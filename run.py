@@ -2,10 +2,10 @@ import os
 from dotenv import load_dotenv
 from app import create_app
 
-# Load environment variables from .env file
+# 从.env文件加载环境变量
 load_dotenv()
 
-# Create Flask application with the specified configuration
+# 使用指定的配置创建Flask应用
 config_name = os.environ.get('FLASK_CONFIG', 'development')
 app = create_app(config_name)
 

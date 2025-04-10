@@ -14,7 +14,7 @@ class User(db.Model):
     phone = db.Column(db.String(20), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
     
-    # Relationships
+    # 关系
     health_records = db.relationship('HealthRecord', foreign_keys='HealthRecord.patient_id', backref='patient')
     doctor_records = db.relationship('HealthRecord', foreign_keys='HealthRecord.doctor_id', backref='doctor')
     
@@ -27,9 +27,9 @@ class HealthRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     patient_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     doctor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    record_type = db.Column(db.String(50), nullable=False)  # diagnosis, treatment, medication, etc.
-    content_hash = db.Column(db.String(64), nullable=False)  # Hash of the content stored in MongoDB
-    mongo_id = db.Column(db.String(64), nullable=False)  # MongoDB document ID
+    record_type = db.Column(db.String(50), nullable=False)  # 诊断、治疗、药物等
+    content_hash = db.Column(db.String(64), nullable=False)  # 存储在MongoDB中的内容的哈希值
+    mongo_id = db.Column(db.String(64), nullable=False)  # MongoDB文档ID
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
@@ -43,11 +43,11 @@ class PrivacyPolicy(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     policy_type = db.Column(db.String(50), nullable=False)  # 'default', 'custom'
     access_level = db.Column(db.String(20), nullable=False)  # 'high', 'medium', 'low'
-    allowed_users = db.Column(db.Text, nullable=True)  # JSON array of user IDs
+    allowed_users = db.Column(db.Text, nullable=True)  # 用户ID的JSON数组
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
-    # Relationship
+    # 关系
     user = db.relationship('User', backref='privacy_policies')
     
     def __repr__(self):
@@ -59,11 +59,11 @@ class QueryLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     query_type = db.Column(db.String(50), nullable=False)
-    query_params = db.Column(db.Text, nullable=True)  # Encrypted query parameters
+    query_params = db.Column(db.Text, nullable=True)  # 加密的查询参数
     timestamp = db.Column(db.DateTime, default=datetime.now)
     success = db.Column(db.Boolean, default=True)
     
-    # Relationship
+    # 关系
     user = db.relationship('User', backref='query_logs')
     
     def __repr__(self):

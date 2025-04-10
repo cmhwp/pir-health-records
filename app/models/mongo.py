@@ -9,14 +9,14 @@ class MongoConnector:
         self.db = None
     
     def init_app(self, app):
-        """Initialize MongoDB connection with Flask app configuration"""
+        """使用Flask应用配置初始化MongoDB连接"""
         mongodb_uri = app.config.get('MONGO_URI')
         db_name = app.config.get('MONGO_DB_NAME')
         
         self.client = MongoClient(mongodb_uri)
         self.db = self.client[db_name]
         
-        # Create necessary collections and indexes if they don't exist
+        # 如果不存在，创建必要的集合和索引
         if 'health_records' not in self.db.list_collection_names():
             self.db.create_collection('health_records')
             self.db.health_records.create_index('record_id', unique=True)
@@ -26,7 +26,7 @@ class MongoConnector:
             self.db.pir_indexes.create_index('keyword')
     
     def store_health_record(self, record_id, content):
-        """Store encrypted health record content in MongoDB"""
+        """在MongoDB中存储加密的健康记录内容"""
         record_doc = {
             'record_id': record_id,
             'content': content,
@@ -38,12 +38,12 @@ class MongoConnector:
         return str(result.inserted_id)
     
     def get_health_record(self, record_id):
-        """Retrieve a health record by its ID"""
+        """通过ID检索健康记录"""
         record = self.db.health_records.find_one({'record_id': record_id})
         return record
     
     def update_health_record(self, record_id, content):
-        """Update an existing health record"""
+        """更新现有的健康记录"""
         result = self.db.health_records.update_one(
             {'record_id': record_id},
             {
@@ -56,8 +56,8 @@ class MongoConnector:
         return result.modified_count > 0
     
     def add_to_pir_index(self, keyword, record_id, encrypted_location=None):
-        """Add a record to the PIR index by keyword"""
-        # Upsert - add record_id to the list if keyword exists, create new doc otherwise
+        """通过关键词将记录添加到PIR索引"""
+        # Upsert - 如果关键词存在，将record_id添加到列表中，否则创建新文档
         result = self.db.pir_indexes.update_one(
             {'keyword': keyword},
             {
@@ -73,11 +73,11 @@ class MongoConnector:
         return result.modified_count > 0 or result.upserted_id is not None
     
     def search_pir_index(self, keyword):
-        """Search the PIR index for a keyword (this is NOT the private query, just for testing)"""
+        """搜索PIR索引中的关键词（这不是私密查询，仅用于测试）"""
         index_doc = self.db.pir_indexes.find_one({'keyword': keyword})
         if index_doc:
             return index_doc.get('record_ids', [])
         return []
 
-# Create a singleton instance
+# 创建单例实例
 mongo_client = MongoConnector() 
