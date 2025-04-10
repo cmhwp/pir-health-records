@@ -11,6 +11,8 @@ class Config:
     
     # MySQL (SQLAlchemy) 配置
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
+        'mysql+pymysql://root:123456@localhost/pir_health'
     
     # Redis配置
     REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -21,10 +23,6 @@ class Config:
     # MongoDB配置
     MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/pir_health')
     MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME', 'pir_health')
-    
-    # MySQL配置
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'mysql+pymysql://root@localhost/pir_health'
     
     # JWT配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt_dev_key')

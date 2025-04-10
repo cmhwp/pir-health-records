@@ -6,6 +6,11 @@ from app.models.mysql import db
 from app.models.mongo import mongo_client
 from app.models.redis import redis_client
 from app.pir.pir_service import pir_system
+import os
+from dotenv import load_dotenv
+
+# 确保环境变量已加载
+load_dotenv()
 
 # 初始化JWT管理器
 jwt = JWTManager()
