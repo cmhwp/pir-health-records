@@ -66,6 +66,16 @@ class RedisConnector:
         key = f"session:{session_id}"
         self.client.delete(key)
     
+    def add_token_to_blocklist(self, jti, expiry=86400):
+        """将JWT令牌加入黑名单"""
+        key = f"jwt:blocklist:{jti}"
+        self.client.set(key, "blocked", ex=expiry)
+    
+    def is_token_blocked(self, jti):
+        """检查JWT令牌是否在黑名单中"""
+        key = f"jwt:blocklist:{jti}"
+        return self.client.exists(key)
+    
     def rate_limit(self, ip_address, limit=100, period=60):
         """为IP地址实现速率限制"""
         key = f"ratelimit:{ip_address}"

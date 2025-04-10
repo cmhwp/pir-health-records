@@ -6,7 +6,7 @@ from app import create_app
 load_dotenv()
 
 # 使用指定的配置创建Flask应用
-config_name = os.environ.get('FLASK_CONFIG', 'development')
+config_name = os.environ.get('FLASK_CONFIG')
 app = create_app(config_name)
 
 if __name__ == '__main__':

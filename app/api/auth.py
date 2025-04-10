@@ -1,7 +1,8 @@
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import get_jwt_identity, jwt_required, get_jwt, create_access_token
 from app.models.mysql import db, User
 from app.models.redis import redis_client
-from app.utils.security import hash_password, verify_password, validate_user_data, login_required, role_required
+from app.utils.security import hash_password, verify_password, validate_user_data, role_required, generate_jwt_tokens
 import uuid
 from datetime import datetime
 
@@ -64,53 +65,51 @@ def login():
     if not user or not verify_password(user.password, data['password']):
         return jsonify({'message': '无效的凭据'}), 401
     
-    # 生成会话令牌
-    session_token = str(uuid.uuid4())
-    
-    # 存储在会话和Redis中
-    session['user_id'] = user.id
-    session['session_token'] = session_token
+    # 生成JWT令牌
+    access_token, refresh_token = generate_jwt_tokens(user.id, user.username, user.role)
     
     # 在Redis中缓存用户数据以便更快访问
     user_data = {
         'id': user.id,
         'username': user.username,
         'role': user.role,
-        'email': user.email,
-        'session_token': session_token
+        'email': user.email
     }
     redis_client.cache_user_data(user.id, user_data)
     
     return jsonify({
         'message': '登录成功',
+        'access_token': access_token,
+        'refresh_token': refresh_token,
         'user': {
             'id': user.id,
             'username': user.username,
-            'role': user.role,
-            'session_token': session_token
+            'role': user.role
         }
     }), 200
 
+@auth_bp.route('/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    """刷新访问令牌"""
+    identity = get_jwt_identity()
+    access_token = create_access_token(identity=identity)
+    return jsonify(access_token=access_token), 200
+
 @auth_bp.route('/logout', methods=['POST'])
-@login_required
+@jwt_required()
 def logout():
-    user_id = session.get('user_id')
-    session_token = session.get('session_token')
-    
-    # 清除会话
-    session.pop('user_id', None)
-    session.pop('session_token', None)
-    
-    # 如果令牌存在，从Redis中移除
-    if session_token:
-        redis_client.delete_session(session_token)
-    
+    # 将当前令牌添加到黑名单 
+    # 注意：这里假设redis_client有一个添加令牌到黑名单的方法
+    jti = get_jwt()["jti"]
+    redis_client.add_token_to_blocklist(jti)
     return jsonify({'message': '已成功登出'}), 200
 
 @auth_bp.route('/me', methods=['GET'])
-@login_required
+@jwt_required()
 def get_current_user():
-    user_id = session.get('user_id')
+    identity = get_jwt_identity()
+    user_id = identity['id']
     
     # 首先尝试从Redis缓存获取
     user_data = redis_client.get_cached_user_data(user_id)
@@ -133,7 +132,7 @@ def get_current_user():
     return jsonify({'user': user_data}), 200
 
 @auth_bp.route('/users', methods=['GET'])
-@login_required
+@jwt_required()
 @role_required(['admin'])
 def get_users():
     # 只有管理员可以列出所有用户
@@ -150,15 +149,16 @@ def get_users():
     return jsonify({'users': users_data}), 200
 
 @auth_bp.route('/users/<int:user_id>', methods=['GET'])
-@login_required
+@jwt_required()
 def get_user(user_id):
     # 用户可以查看自己的个人资料，医生可以查看其患者，管理员可以查看任何人
-    current_user_id = session.get('user_id')
-    current_user = User.query.get(current_user_id)
+    identity = get_jwt_identity()
+    current_user_id = identity['id']
+    current_user_role = identity['role']
     
     # 授权检查
-    if current_user.role != 'admin' and current_user_id != user_id:
-        if current_user.role == 'doctor':
+    if current_user_role != 'admin' and current_user_id != user_id:
+        if current_user_role == 'doctor':
             # 检查用户是否是该医生的患者
             # （在实际系统中，这个检查会更复杂）
             pass
@@ -181,14 +181,15 @@ def get_user(user_id):
     return jsonify({'user': user_data}), 200
 
 @auth_bp.route('/users/<int:user_id>', methods=['PUT'])
-@login_required
+@jwt_required()
 def update_user(user_id):
     # 用户可以更新自己的个人资料，管理员可以更新任何人
-    current_user_id = session.get('user_id')
-    current_user = User.query.get(current_user_id)
+    identity = get_jwt_identity()
+    current_user_id = identity['id']
+    current_user_role = identity['role']
     
     # 授权检查
-    if current_user.role != 'admin' and current_user_id != user_id:
+    if current_user_role != 'admin' and current_user_id != user_id:
         return jsonify({'message': '未授权访问'}), 403
     
     user = User.query.get(user_id)
@@ -221,7 +222,7 @@ def update_user(user_id):
     if 'phone' in data:
         user.phone = data['phone']
     
-    if 'role' in data and current_user.role == 'admin':
+    if 'role' in data and current_user_role == 'admin':
         user.role = data['role']
     
     # 保存更改

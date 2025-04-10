@@ -10,6 +10,10 @@ from Crypto.Util.Padding import pad, unpad
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from flask import request, jsonify, session, current_app
+from flask_jwt_extended import (
+    verify_jwt_in_request, get_jwt_identity, 
+    create_access_token, create_refresh_token
+)
 
 # 加密和哈希函数
 def hash_password(password):
@@ -23,6 +27,17 @@ def verify_password(hashed_password, password):
 def generate_token():
     """生成随机令牌"""
     return base64.b64encode(os.urandom(64)).decode('utf-8')
+
+def generate_jwt_tokens(user_id, username, role):
+    """生成JWT访问令牌和刷新令牌"""
+    identity = {
+        'id': user_id,
+        'username': username,
+        'role': role
+    }
+    access_token = create_access_token(identity=identity)
+    refresh_token = create_refresh_token(identity=identity)
+    return access_token, refresh_token
 
 def encrypt_data(data, key=None):
     """使用AES加密数据"""
@@ -74,32 +89,34 @@ def hash_content(content):
 
 # 认证装饰器
 def login_required(f):
-    """要求路由进行认证的装饰器"""
+    """要求路由进行JWT认证的装饰器"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({'message': '需要认证'}), 401
-        return f(*args, **kwargs)
+        try:
+            verify_jwt_in_request()
+            return f(*args, **kwargs)
+        except Exception as e:
+            return jsonify({'message': '认证失败', 'error': str(e)}), 401
     return decorated_function
 
 def role_required(roles):
-    """要求路由具有特定角色的装饰器"""
+    """要求路由具有特定角色的JWT装饰器"""
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
-            from app.models.mysql import User
-            
-            if 'user_id' not in session:
-                return jsonify({'message': '需要认证'}), 401
-            
-            user = User.query.get(session['user_id'])
-            if not user:
-                return jsonify({'message': '用户未找到'}), 404
-            
-            if user.role not in roles:
-                return jsonify({'message': '权限不足'}), 403
-            
-            return f(*args, **kwargs)
+            try:
+                verify_jwt_in_request()
+                identity = get_jwt_identity()
+                
+                if not identity or 'role' not in identity:
+                    return jsonify({'message': '无效的用户身份'}), 401
+                
+                if identity['role'] not in roles:
+                    return jsonify({'message': '权限不足'}), 403
+                
+                return f(*args, **kwargs)
+            except Exception as e:
+                return jsonify({'message': '认证失败', 'error': str(e)}), 401
         return decorated_function
     return decorator
 

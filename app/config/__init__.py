@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from datetime import timedelta
 
 # 从.env文件加载环境变量
 load_dotenv()
@@ -20,6 +21,18 @@ class Config:
     # MongoDB配置
     MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/pir_health')
     MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME', 'pir_health')
+    
+    # MySQL配置
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
+        'mysql+pymysql://root@localhost/pir_health'
+    
+    # JWT配置
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt_dev_key')
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(seconds=int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 3600)))
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(seconds=int(os.environ.get('JWT_REFRESH_TOKEN_EXPIRES', 604800)))
+    JWT_TOKEN_LOCATION = ['headers']
+    JWT_HEADER_NAME = 'Authorization'
+    JWT_HEADER_TYPE = 'Bearer'
     
     @staticmethod
     def init_app(app):
