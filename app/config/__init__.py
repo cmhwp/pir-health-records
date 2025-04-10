@@ -28,16 +28,16 @@ class Config:
 class DevelopmentConfig(Config):
     DEBUG = True
     SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or \
-        'mysql+pymysql://root:password@localhost/pir_health_dev'
+        'mysql+pymysql://root:123456@localhost/pir_health_dev'
     
 class TestingConfig(Config):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or \
-        'mysql+pymysql://root:password@localhost/pir_health_test'
+        'mysql+pymysql://root:123456@localhost/pir_health_test'
 
 class ProductionConfig(Config):
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'mysql+pymysql://root:password@localhost/pir_health'
+        'mysql+pymysql://root:123456@localhost/pir_health'
 
 config = {
     'development': DevelopmentConfig,

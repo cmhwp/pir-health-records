@@ -29,8 +29,7 @@ def create_app(config_name='default'):
     app.register_blueprint(query_bp, url_prefix='/api/query')
     
     # 创建数据库表
-    @app.before_first_request
-    def create_tables():
+    with app.app_context():
         db.create_all()
     
     return app 
