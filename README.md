@@ -17,6 +17,7 @@
 │   │   └── main.py     # 主要路由
 │   └── utils/          # 工具函数
 ├── requirements.txt    # 项目依赖
+├── .env                # 环境变量配置
 └── run.py             # 应用入口点
 ```
 
@@ -28,6 +29,7 @@
 - 安全的密码加密和验证
 - 角色验证装饰器保护敏感路由
 - 多数据库支持（MySQL、MongoDB、Redis）
+- 基于环境变量的灵活配置
 
 ## 支持的角色
 
@@ -74,16 +76,38 @@
    pip install -r requirements.txt
    ```
 
-### 配置
+### 配置环境变量
 
 创建一个`.env`文件在根目录下，包含以下变量:
 
 ```
-SECRET_KEY=你的密钥
-DATABASE_URL=你的数据库连接字符串
-MONGO_URI=你的MongoDB连接字符串
-REDIS_URL=你的Redis连接字符串
+# 基本配置
+SECRET_KEY=你的密钥           # 用于加密会话和JWT
+FLASK_ENV=development       # 环境类型: development, testing, production
+FLASK_DEBUG=true            # 是否开启调试模式
+PORT=5000                   # 应用端口
+
+# 数据库配置
+# SQLite (备用)
+DEV_DATABASE_URL=sqlite:///dev.db
+TEST_DATABASE_URL=sqlite:///test.db
+DATABASE_URL=sqlite:///prod.db
+
+# MySQL
+DEV_MYSQL_URL=mysql://用户名:密码@主机/开发数据库
+TEST_MYSQL_URL=mysql://用户名:密码@主机/测试数据库
+MYSQL_URL=mysql://用户名:密码@主机/生产数据库
+
+# MongoDB
+DEV_MONGO_URI=mongodb://主机:端口/开发数据库
+TEST_MONGO_URI=mongodb://主机:端口/测试数据库
+MONGO_URI=mongodb://主机:端口/生产数据库
+
+# Redis
+REDIS_URL=redis://主机:端口/数据库号
 ```
+
+系统会根据`FLASK_ENV`环境变量自动选择相应的数据库配置。
 
 ### 运行应用
 
@@ -91,7 +115,7 @@ REDIS_URL=你的Redis连接字符串
 python run.py
 ```
 
-服务器将在 http://localhost:5000 启动
+服务器将基于`.env`文件中的配置启动（默认为http://localhost:5000）
 
 ## API 端点
 
@@ -118,4 +142,24 @@ python run.py
 - `GET /api/patient-dashboard`: 患者控制台数据
 - `GET /api/doctor-dashboard`: 医生控制台数据
 - `GET /api/researcher-dashboard`: 研究人员控制台数据
-- `GET /api/admin-dashboard`: 管理员控制台数据 
+- `GET /api/admin-dashboard`: 管理员控制台数据
+
+## 部署
+
+### 生产环境
+
+对于生产环境，建议修改以下配置：
+
+1. 在`.env`文件中设置:
+   ```
+   FLASK_ENV=production
+   FLASK_DEBUG=false
+   ```
+
+2. 确保使用强密码和安全的数据库连接字符串
+3. 考虑使用Gunicorn或uWSGI作为WSGI服务器
+4. 配置反向代理（如Nginx）以提高安全性和性能
+
+### Docker部署
+
+项目可以使用Docker进行容器化部署。详细指南请参考Docker文档。 
