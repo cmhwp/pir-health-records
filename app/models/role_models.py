@@ -14,8 +14,8 @@ class PatientInfo(db.Model):
     emergency_phone = db.Column(db.String(20), nullable=True)
     medical_history = db.Column(db.Text, nullable=True)
     allergies = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
     def to_dict(self):
         return {
@@ -43,8 +43,8 @@ class DoctorInfo(db.Model):
     hospital = db.Column(db.String(100), nullable=True)  # 所属医院
     department = db.Column(db.String(100), nullable=True)  # 部门
     bio = db.Column(db.Text, nullable=True)  # 简介
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
     def to_dict(self):
         return {
@@ -72,8 +72,8 @@ class ResearcherInfo(db.Model):
     publications = db.Column(db.Text, nullable=True)  # 发表文章
     projects = db.Column(db.Text, nullable=True)  # 参与项目
     bio = db.Column(db.Text, nullable=True)  # 简介
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     
     def to_dict(self):
         return {
