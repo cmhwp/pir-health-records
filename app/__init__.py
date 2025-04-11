@@ -25,12 +25,10 @@ def create_app(config_name="development"):
     
     # 注册蓝图
     from .routers.main import main_bp
-    from .routers.database_examples import db_examples_bp
     from .routers.auth import auth_bp
     from .routers.admin import admin_bp
     
     app.register_blueprint(main_bp)
-    app.register_blueprint(db_examples_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
     

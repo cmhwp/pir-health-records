@@ -1,146 +1,121 @@
-# Flask Backend Project
+# 医疗系统 - 角色权限管理
 
-A Flask backend API project with a modular structure and multiple database integrations.
+基于Flask构建的医疗系统RBAC（基于角色的访问控制）后端API项目。
 
-## Project Structure
+## 项目架构
 
 ```
 .
 ├── app/
-│   ├── config/         # Configuration settings
-│   ├── models/         # Database models
-│   ├── routers/        # API routes
-│   └── utils/          # Utility functions
-├── requirements.txt    # Project dependencies
-└── run.py             # Application entry point
+│   ├── config/         # 配置设置
+│   ├── models/         # 数据库模型
+│   │   ├── user.py     # 用户和角色模型
+│   │   └── role_models.py # 角色特定信息模型
+│   ├── routers/        # API路由
+│   │   ├── auth.py     # 认证相关路由
+│   │   ├── admin.py    # 管理员路由
+│   │   └── main.py     # 主要路由
+│   └── utils/          # 工具函数
+├── requirements.txt    # 项目依赖
+└── run.py             # 应用入口点
 ```
 
-## Features
+## 功能特点
 
-- Flask RESTful API framework
-- SQLAlchemy ORM with MySQL support
-- MongoDB integration through Flask-PyMongo
-- Redis for caching and session management
-- Environment-based configuration
-- CORS support
+- 完整的RBAC角色管理系统（患者、医生、研究人员、管理员）
+- JWT认证和Flask-Login会话管理
+- 角色特定的用户资料和数据模型
+- 安全的密码加密和验证
+- 角色验证装饰器保护敏感路由
+- 多数据库支持（MySQL、MongoDB、Redis）
 
-## Getting Started
+## 支持的角色
 
-### Prerequisites
+- **患者(Patient)**: 可以查看个人医疗记录、预约和处方信息
+- **医生(Doctor)**: 可以管理患者、预约和医疗记录
+- **研究人员(Researcher)**: 可以访问研究数据和参与研究项目
+- **管理员(Admin)**: 系统管理员，具有完全访问权限
 
-- Python 3.8 or higher
-- pip (Python package manager)
-- MySQL (Optional)
-- MongoDB (Optional)
-- Redis (Optional)
+## 开始使用
 
-### Installation
+### 前提条件
 
-1. Clone the repository:
+- Python 3.8 或更高版本
+- pip (Python包管理器)
+- MySQL（可选）
+- MongoDB（可选）
+- Redis（可选）
+
+### 安装
+
+1. 克隆仓库:
    ```
-   git clone <repository-url>
-   cd <project-folder>
+   git clone <仓库URL>
+   cd <项目文件夹>
    ```
 
-2. Create a virtual environment:
+2. 创建虚拟环境:
    ```
    python -m venv venv
    ```
 
-3. Activate the virtual environment:
-   - On Windows:
+3. 激活虚拟环境:
+   - Windows:
      ```
      venv\Scripts\activate
      ```
-   - On macOS/Linux:
+   - macOS/Linux:
      ```
      source venv/bin/activate
      ```
 
-4. Install dependencies:
+4. 安装依赖:
    ```
    pip install -r requirements.txt
    ```
 
-### Database Setup
+### 配置
 
-#### MySQL
+创建一个`.env`文件在根目录下，包含以下变量:
 
-1. Install MySQL if not already installed
-2. Create a database for the project
-3. Configure connection string in `.env` file
+```
+SECRET_KEY=你的密钥
+DATABASE_URL=你的数据库连接字符串
+MONGO_URI=你的MongoDB连接字符串
+REDIS_URL=你的Redis连接字符串
+```
 
-#### MongoDB
-
-1. Install MongoDB if not already installed
-2. MongoDB will automatically create the database on first use
-3. Configure connection string in `.env` file
-
-#### Redis
-
-1. Install Redis if not already installed
-2. Configure connection string in `.env` file
-
-### Running the Application
-
-To run the application in development mode:
+### 运行应用
 
 ```
 python run.py
 ```
 
-The server will start at http://localhost:5000
+服务器将在 http://localhost:5000 启动
 
-## API Endpoints
+## API 端点
 
-### Main Endpoints
+### 认证相关
 
-- `GET /`: Welcome message
-- `GET /api/health`: Health check endpoint
+- `POST /api/auth/register`: 用户注册
+- `POST /api/auth/login`: 用户登录
+- `POST /api/auth/logout`: 用户登出
+- `GET /api/auth/me`: 获取当前用户信息
+- `PUT /api/auth/me`: 更新当前用户信息
+- `POST /api/auth/change-password`: 修改密码
 
-### Database Example Endpoints
+### 管理员专用
 
-#### MySQL (SQLAlchemy)
+- `GET /api/admin/users`: 获取所有用户列表（分页）
+- `GET /api/admin/users/<id>`: 获取单个用户详情
+- `POST /api/admin/users`: 创建新用户
+- `PUT /api/admin/users/<id>`: 更新用户信息
+- `DELETE /api/admin/users/<id>`: 删除用户
+- `GET /api/admin/stats`: 获取系统统计数据
 
-- `GET /api/db/mysql/users`: Get all users
-- `POST /api/db/mysql/users`: Create a new user
-- `GET /api/db/mysql/products`: Get all products
-- `POST /api/db/mysql/products`: Create a new product
+### 角色专用
 
-#### MongoDB
-
-- `GET /api/db/mongodb/logs`: Get logs with optional filtering
-- `POST /api/db/mongodb/logs`: Create a new log entry
-
-#### Redis
-
-- `GET /api/db/redis/cache?key=<key>`: Get cached value
-- `POST /api/db/redis/cache`: Set a value in cache
-- `DELETE /api/db/redis/cache?key=<key>`: Delete a value from cache
-
-## Adding Environment Variables
-
-Create a `.env` file in the root directory with the following variables:
-
-```
-# General
-SECRET_KEY=your-secret-key
-
-# SQLite Configurations (Default fallback)
-DEV_DATABASE_URL=sqlite:///dev.db
-TEST_DATABASE_URL=sqlite:///test.db
-DATABASE_URL=sqlite:///prod.db
-
-# MySQL Configurations
-DEV_MYSQL_URL=mysql://root:password@localhost/flask_dev
-TEST_MYSQL_URL=mysql://root:password@localhost/flask_test
-MYSQL_URL=mysql://user:password@localhost/flask_prod
-
-# MongoDB Configurations
-DEV_MONGO_URI=mongodb://localhost:27017/flask_dev
-TEST_MONGO_URI=mongodb://localhost:27017/flask_test
-MONGO_URI=mongodb://localhost:27017/flask_prod
-
-# Redis Configuration
-REDIS_URL=redis://localhost:6379/0
-``` 
+- `GET /api/patient-dashboard`: 患者控制台数据
+- `GET /api/doctor-dashboard`: 医生控制台数据
+- `GET /api/researcher-dashboard`: 研究人员控制台数据
+- `GET /api/admin-dashboard`: 管理员控制台数据 
