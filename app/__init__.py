@@ -31,9 +31,16 @@ def create_app(config_name="development"):
     from .routers.main import main_bp
     from .routers.auth import auth_bp
     from .routers.admin import admin_bp
+    from .routers.health_records import health_bp
     
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(health_bp)
+    
+    # 确保上传目录存在
+    import os
+    os.makedirs(os.path.join(app.root_path, 'uploads', 'avatars'), exist_ok=True)
+    os.makedirs(os.path.join(app.root_path, 'uploads', 'records'), exist_ok=True)
     
     return app 

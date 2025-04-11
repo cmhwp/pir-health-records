@@ -1,13 +1,24 @@
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify, current_app, g, send_from_directory
 from flask_login import login_user, logout_user, login_required, current_user
 from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo
 from werkzeug.security import generate_password_hash
 import re
 import jwt
+import os
 from datetime import datetime, timedelta
 from functools import wraps
+from werkzeug.utils import secure_filename
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
+
+# 确保上传目录存在
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads', 'avatars')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # 角色验证装饰器
 def role_required(role):
@@ -309,4 +320,68 @@ def change_password():
         return jsonify({
             'success': False,
             'message': f'密码修改失败: {str(e)}'
-        }), 500 
+        }), 500
+
+# 上传头像
+@auth_bp.route('/avatar', methods=['POST'])
+@login_required
+def upload_avatar():
+    if 'avatar' not in request.files:
+        return jsonify({
+            'success': False,
+            'message': '没有上传文件'
+        }), 400
+        
+    file = request.files['avatar']
+    if file.filename == '':
+        return jsonify({
+            'success': False,
+            'message': '没有选择文件'
+        }), 400
+        
+    if not allowed_file(file.filename):
+        return jsonify({
+            'success': False,
+            'message': '不支持的文件类型，只支持: ' + ', '.join(ALLOWED_EXTENSIONS)
+        }), 400
+        
+    try:
+        # 生成安全的文件名
+        filename = secure_filename(file.filename)
+        # 添加用户ID和时间戳，确保文件名唯一
+        filename = f"{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
+        # 保存文件
+        file.save(filepath)
+        
+        # 更新用户头像
+        current_user.avatar = filename
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '头像上传成功',
+            'data': {
+                'avatar': filename
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"头像上传失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'头像上传失败: {str(e)}'
+        }), 500
+
+# 获取头像
+@auth_bp.route('/avatar/<filename>', methods=['GET'])
+def get_avatar(filename):
+    try:
+        return send_from_directory(UPLOAD_FOLDER, filename)
+    except Exception as e:
+        current_app.logger.error(f"获取头像失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': '头像不存在'
+        }), 404 

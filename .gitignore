@@ -23,3 +23,7 @@ ENV/
 # 数据库文件
 *.db
 *.sqlite3 
+
+# 上传的文件
+uploads/
+
