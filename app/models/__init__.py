@@ -1,7 +1,16 @@
 from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager
 
 db = SQLAlchemy()
+login_manager = LoginManager()
+login_manager.login_view = 'auth.login'
+login_manager.login_message = '请先登录才能访问此页面'
 
 # 在此导入模型，使其在导入db时可用
-from .user import User
-from .product import Product 
+from .user import User, Role
+from .product import Product
+from .role_models import PatientInfo, DoctorInfo, ResearcherInfo
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id)) 

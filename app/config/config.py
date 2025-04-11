@@ -18,9 +18,6 @@ class Config:
 
 class DevelopmentConfig(Config):
     DEBUG = True
-    # SQLite
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or \
-        'sqlite:///dev.db'
     # MySQL
     MYSQL_DATABASE_URI = os.environ.get('DEV_MYSQL_URL') or \
         'mysql://root:password@localhost/flask_dev'
@@ -29,9 +26,6 @@ class DevelopmentConfig(Config):
 
 class TestingConfig(Config):
     TESTING = True
-    # SQLite
-    SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or \
-        'sqlite:///test.db'
     # MySQL
     MYSQL_DATABASE_URI = os.environ.get('TEST_MYSQL_URL') or \
         'mysql://root:password@localhost/flask_test'
@@ -39,9 +33,6 @@ class TestingConfig(Config):
     MONGO_URI = os.environ.get('TEST_MONGO_URI') or 'mongodb://localhost:27017/flask_test'
 
 class ProductionConfig(Config):
-    # SQLite
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'sqlite:///prod.db'
     # MySQL
     MYSQL_DATABASE_URI = os.environ.get('MYSQL_URL') or \
         'mysql://user:password@localhost/flask_prod'
