@@ -18,26 +18,26 @@ class Config:
 
 class DevelopmentConfig(Config):
     DEBUG = True
-    # MySQL
-    MYSQL_DATABASE_URI = os.environ.get('DEV_MYSQL_URL') or \
-        'mysql://root:password@localhost/flask_dev'
+    # SQLite 或 MySQL
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or os.environ.get('DEV_MYSQL_URL') or \
+        'sqlite:///pir_health.db'
     # MongoDB 开发数据库
-    MONGO_URI = os.environ.get('DEV_MONGO_URI') or 'mongodb://localhost:27017/flask_dev'
+    MONGO_URI = os.environ.get('DEV_MONGO_URI') or 'mongodb://localhost:27017/pir_health'
 
 class TestingConfig(Config):
     TESTING = True
-    # MySQL
-    MYSQL_DATABASE_URI = os.environ.get('TEST_MYSQL_URL') or \
-        'mysql://root:password@localhost/flask_test'
+    # SQLite 或 MySQL
+    SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or os.environ.get('TEST_MYSQL_URL') or \
+        'sqlite:///pir_health_test.db'
     # MongoDB 测试数据库
-    MONGO_URI = os.environ.get('TEST_MONGO_URI') or 'mongodb://localhost:27017/flask_test'
+    MONGO_URI = os.environ.get('TEST_MONGO_URI') or 'mongodb://localhost:27017/pir_health_test'
 
 class ProductionConfig(Config):
-    # MySQL
-    MYSQL_DATABASE_URI = os.environ.get('MYSQL_URL') or \
-        'mysql://user:password@localhost/flask_prod'
+    # SQLite 或 MySQL
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or os.environ.get('MYSQL_URL') or \
+        'sqlite:///pir_health.db'
     # MongoDB 生产数据库
-    MONGO_URI = os.environ.get('MONGO_URI') or 'mongodb://localhost:27017/flask_prod'
+    MONGO_URI = os.environ.get('MONGO_URI') or 'mongodb://localhost:27017/pir_health'
 
 config = {
     'development': DevelopmentConfig,
