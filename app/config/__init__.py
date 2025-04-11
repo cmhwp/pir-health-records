@@ -1,1 +1,1 @@
-# This file makes the config directory a Python package 
+# 此文件使config目录成为Python包 
