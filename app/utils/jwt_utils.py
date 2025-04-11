@@ -30,8 +30,14 @@ def init_jwt_loader(app):
             if 'exp' in payload and datetime.utcnow().timestamp() > payload['exp']:
                 return
             
+            # 获取用户并登录
+            user_id = payload.get('sub')
+            user = User.query.get(user_id)
+            if user:
+                login_user(user)  # 使用Flask-Login登录用户
+            
             # 将用户ID存储在g对象中，以便后续使用
-            g.current_user_id = payload.get('sub')
+            g.current_user_id = user_id
             g.current_user_role = payload.get('role')
         except Exception as e:
             current_app.logger.error(f"JWT解析错误: {str(e)}")

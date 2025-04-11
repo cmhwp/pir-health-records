@@ -210,12 +210,18 @@ def logout():
 
 # 获取当前用户信息
 @auth_bp.route('/me', methods=['GET'])
-@api_login_required
 def get_current_user():
-    return jsonify({
-        'success': True,
-        'data': current_user.to_dict()
-    })
+    # 检查用户是否通过JWT或会话认证
+    if current_user.is_authenticated:
+        return jsonify({
+            'success': True,
+            'data': current_user.to_dict()
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': '未授权，请先登录'
+        }), 401
 
 # 更新用户信息
 @auth_bp.route('/me', methods=['PUT'])
