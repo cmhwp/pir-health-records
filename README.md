@@ -1,4 +1,4 @@
-# 医疗系统 - 角色权限管理
+# 基于隐匿查询的电子健康记录隐私保护查询系统
 
 基于Flask构建的医疗系统RBAC（基于角色的访问控制）后端API项目。
 
@@ -44,7 +44,7 @@
 
 - Python 3.8 或更高版本
 - pip (Python包管理器)
-- MySQL（可选）
+- MySQL (必须)
 - MongoDB（可选）
 - Redis（可选）
 
@@ -85,29 +85,35 @@
 SECRET_KEY=你的密钥           # 用于加密会话和JWT
 FLASK_ENV=development       # 环境类型: development, testing, production
 FLASK_DEBUG=true            # 是否开启调试模式
+HOST=0.0.0.0                # 主机地址，0.0.0.0表示所有接口
 PORT=5000                   # 应用端口
 
 # 数据库配置
-# SQLite (备用)
-DEV_DATABASE_URL=sqlite:///dev.db
-TEST_DATABASE_URL=sqlite:///test.db
-DATABASE_URL=sqlite:///prod.db
-
-# MySQL
+# MySQL 配置 (必须)
 DEV_MYSQL_URL=mysql://用户名:密码@主机/开发数据库
 TEST_MYSQL_URL=mysql://用户名:密码@主机/测试数据库
 MYSQL_URL=mysql://用户名:密码@主机/生产数据库
 
-# MongoDB
+# MongoDB 配置 (可选)
 DEV_MONGO_URI=mongodb://主机:端口/开发数据库
 TEST_MONGO_URI=mongodb://主机:端口/测试数据库
 MONGO_URI=mongodb://主机:端口/生产数据库
 
-# Redis
+# Redis 配置 (可选)
 REDIS_URL=redis://主机:端口/数据库号
 ```
 
 系统会根据`FLASK_ENV`环境变量自动选择相应的数据库配置。
+
+### 数据库准备
+
+在运行应用前，确保已创建MySQL数据库：
+
+```sql
+CREATE DATABASE pir_health_dev;  -- 开发环境
+CREATE DATABASE pir_health_test; -- 测试环境
+CREATE DATABASE pir_health;      -- 生产环境
+```
 
 ### 运行应用
 
