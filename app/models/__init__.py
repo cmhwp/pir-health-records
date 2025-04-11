@@ -11,8 +11,10 @@ from .user import User, Role
 from .role_models import PatientInfo, DoctorInfo, ResearcherInfo
 from .health_records import (
     RecordType, RecordVisibility, HealthRecord, 
-    RecordFile, MedicationRecord, VitalSign, QueryHistory
+    RecordFile, MedicationRecord, VitalSign, QueryHistory,
+    SharePermission, SharedRecord
 )
+from .notification import Notification, NotificationType
 
 @login_manager.user_loader
 def load_user(user_id):

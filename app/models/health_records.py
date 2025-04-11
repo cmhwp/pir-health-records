@@ -2,6 +2,8 @@ from . import db
 from datetime import datetime
 import enum
 from sqlalchemy.dialects.mysql import JSON
+from bson import ObjectId
+from flask import current_app
 
 class RecordType(enum.Enum):
     MEDICAL_HISTORY = "medical_history"  # 病历
@@ -18,8 +20,10 @@ class RecordVisibility(enum.Enum):
     RESEARCHER = "researcher"  # 研究人员可见
     PUBLIC = "public"          # 公开
 
+# =========================== SQLAlchemy模型 ===========================
+
 class HealthRecord(db.Model):
-    """健康记录基本模型"""
+    """健康记录基本模型 (SQL数据库)"""
     __tablename__ = 'health_records'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -57,10 +61,46 @@ class HealthRecord(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+    
+    @staticmethod
+    def from_mongo_doc(mongo_doc):
+        """从MongoDB文档创建SQLAlchemy对象"""
+        if not mongo_doc:
+            return None
+            
+        # 转换记录类型和可见性
+        try:
+            record_type = RecordType(mongo_doc.get('record_type'))
+        except (ValueError, TypeError):
+            record_type = RecordType.OTHER
+            
+        try:
+            visibility = RecordVisibility(mongo_doc.get('visibility'))
+        except (ValueError, TypeError):
+            visibility = RecordVisibility.PRIVATE
+            
+        # 创建健康记录
+        record = HealthRecord(
+            patient_id=mongo_doc.get('patient_id'),
+            record_type=record_type,
+            title=mongo_doc.get('title', ''),
+            description=mongo_doc.get('description'),
+            record_date=mongo_doc.get('record_date') if isinstance(mongo_doc.get('record_date'), datetime) else datetime.now(),
+            institution=mongo_doc.get('institution'),
+            doctor_name=mongo_doc.get('doctor_name'),
+            visibility=visibility,
+            tags=mongo_doc.get('tags'),
+            data=mongo_doc.get('data')
+        )
+        
+        # 设置MongoDB ID作为外部参考
+        record.mongo_id = str(mongo_doc.get('_id'))
+        
+        return record
 
 
 class RecordFile(db.Model):
-    """记录相关文件"""
+    """记录相关文件 (SQL数据库)"""
     __tablename__ = 'record_files'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -85,7 +125,7 @@ class RecordFile(db.Model):
 
 
 class MedicationRecord(db.Model):
-    """用药记录，与健康记录关联"""
+    """用药记录，与健康记录关联 (SQL数据库)"""
     __tablename__ = 'medication_records'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -117,7 +157,7 @@ class MedicationRecord(db.Model):
 
 
 class VitalSign(db.Model):
-    """生命体征记录"""
+    """生命体征记录 (SQL数据库)"""
     __tablename__ = 'vital_signs'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -143,7 +183,7 @@ class VitalSign(db.Model):
 
 
 class QueryHistory(db.Model):
-    """查询历史，用于匿名查询分析"""
+    """查询历史，用于匿名查询分析 (SQL数据库)"""
     __tablename__ = 'query_history'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -163,4 +203,91 @@ class QueryHistory(db.Model):
             'query_params': self.query_params,
             'is_anonymous': self.is_anonymous,
             'query_time': self.query_time.isoformat() if self.query_time else None
-        } 
+        }
+
+
+# =========================== MongoDB相关功能 ===========================
+
+def mongo_health_record_to_dict(mongo_record):
+    """将MongoDB中的健康记录转换为字典格式"""
+    if not mongo_record:
+        return None
+        
+    # 确保_id是字符串
+    if '_id' in mongo_record:
+        mongo_record['_id'] = str(mongo_record['_id'])
+        
+    # 处理日期字段
+    for date_field in ['record_date', 'created_at', 'updated_at']:
+        if date_field in mongo_record and mongo_record[date_field] and isinstance(mongo_record[date_field], datetime):
+            mongo_record[date_field] = mongo_record[date_field].isoformat()
+            
+    # 处理嵌套的用药记录
+    if 'medication' in mongo_record and mongo_record['medication']:
+        for date_field in ['start_date', 'end_date']:
+            if date_field in mongo_record['medication'] and mongo_record['medication'][date_field] and isinstance(mongo_record['medication'][date_field], datetime):
+                mongo_record['medication'][date_field] = mongo_record['medication'][date_field].isoformat()
+                
+    # 处理生命体征记录
+    if 'vital_signs' in mongo_record and mongo_record['vital_signs']:
+        for vital_sign in mongo_record['vital_signs']:
+            if 'measured_at' in vital_sign and vital_sign['measured_at'] and isinstance(vital_sign['measured_at'], datetime):
+                vital_sign['measured_at'] = vital_sign['measured_at'].isoformat()
+                
+    return mongo_record
+
+# =========================== 记录共享功能 ===========================
+
+class SharePermission(enum.Enum):
+    VIEW = "view"         # 仅查看权限
+    ANNOTATE = "annotate" # 允许添加注释
+    FULL = "full"         # 完全访问（可下载文件等）
+
+class SharedRecord(db.Model):
+    """健康记录共享 (SQL数据库)"""
+    __tablename__ = 'shared_records'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    record_id = db.Column(db.String(50), nullable=False)  # MongoDB中的记录ID
+    owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # 记录所有者
+    shared_with = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # 共享给的用户
+    permission = db.Column(db.Enum(SharePermission), default=SharePermission.VIEW)  # 共享权限
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    expires_at = db.Column(db.DateTime, nullable=True)  # 共享过期时间，NULL表示永不过期
+    access_count = db.Column(db.Integer, default=0)  # 访问计数
+    last_accessed = db.Column(db.DateTime, nullable=True)  # 最后访问时间
+    access_key = db.Column(db.String(100), nullable=False)  # 访问密钥，用于验证
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'record_id': self.record_id,
+            'owner_id': self.owner_id,
+            'shared_with': self.shared_with,
+            'permission': self.permission.value,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'access_count': self.access_count,
+            'last_accessed': self.last_accessed.isoformat() if self.last_accessed else None
+        }
+    
+    def is_valid(self):
+        """检查共享是否有效（未过期）"""
+        if not self.expires_at:
+            return True
+        return datetime.now() < self.expires_at
+    
+    def record_access(self):
+        """记录一次访问"""
+        self.access_count += 1
+        self.last_accessed = datetime.now()
+
+def format_mongo_id(id_value):
+    """将字符串ID格式化为ObjectId"""
+    if isinstance(id_value, str):
+        try:
+            return ObjectId(id_value)
+        except:
+            current_app.logger.error(f"Invalid ObjectId: {id_value}")
+            return None
+    return id_value 
