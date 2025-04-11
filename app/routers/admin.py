@@ -1,14 +1,14 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo
-from .auth import role_required
+from ..routers.auth import role_required, api_login_required
 from sqlalchemy import or_
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 
 # 获取所有用户列表
 @admin_bp.route('/users', methods=['GET'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def get_users():
     page = request.args.get('page', 1, type=int)
@@ -49,7 +49,7 @@ def get_users():
 
 # 获取单个用户详情
 @admin_bp.route('/users/<int:user_id>', methods=['GET'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def get_user(user_id):
     user = User.query.get_or_404(user_id)
@@ -61,7 +61,7 @@ def get_user(user_id):
 
 # 创建用户（管理员专用）
 @admin_bp.route('/users', methods=['POST'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def create_user():
     data = request.json
@@ -163,7 +163,7 @@ def create_user():
 
 # 更新用户信息（管理员专用）
 @admin_bp.route('/users/<int:user_id>', methods=['PUT'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def update_user(user_id):
     user = User.query.get_or_404(user_id)
@@ -280,7 +280,7 @@ def update_user(user_id):
 
 # 删除用户
 @admin_bp.route('/users/<int:user_id>', methods=['DELETE'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def delete_user(user_id):
     user = User.query.get_or_404(user_id)
@@ -310,7 +310,7 @@ def delete_user(user_id):
 
 # 获取系统统计数据
 @admin_bp.route('/stats', methods=['GET'])
-@login_required
+@api_login_required
 @role_required(Role.ADMIN)
 def get_stats():
     try:

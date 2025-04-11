@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from ..models import db, User, Role
-from ..routers.auth import role_required
+from ..routers.auth import role_required, api_login_required
 
 main_bp = Blueprint('main', __name__)
 
@@ -33,7 +33,7 @@ def public_info():
 
 # 受保护路由 - 需要登录
 @main_bp.route('/api/protected')
-@login_required
+@api_login_required
 def protected():
     return jsonify({
         'success': True,
@@ -96,7 +96,7 @@ def doctor_dashboard():
 
 # 研究人员专用路由
 @main_bp.route('/api/researcher-dashboard')
-@login_required
+@api_login_required
 @role_required(Role.RESEARCHER)
 def researcher_dashboard():
     return jsonify({

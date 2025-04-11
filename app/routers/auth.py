@@ -13,7 +13,7 @@ auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 def role_required(role):
     def decorator(f):
         @wraps(f)
-        @login_required
+        @api_login_required
         def decorated_function(*args, **kwargs):
             if not current_user.has_role(role):
                 return jsonify({
@@ -23,6 +23,18 @@ def role_required(role):
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
+# 自定义装饰器，用于API接口的登录验证，不使用重定向
+def api_login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated:
+            return jsonify({
+                'success': False,
+                'message': '未授权，请先登录'
+            }), 401
+        return f(*args, **kwargs)
+    return decorated_function
 
 # 注册
 @auth_bp.route('/register', methods=['POST'])
@@ -177,7 +189,7 @@ def login():
 
 # 登出
 @auth_bp.route('/logout', methods=['POST'])
-@login_required
+@api_login_required  # 使用自定义装饰器替代login_required
 def logout():
     logout_user()
     return jsonify({
@@ -187,7 +199,7 @@ def logout():
 
 # 获取当前用户信息
 @auth_bp.route('/me', methods=['GET'])
-@login_required
+@api_login_required
 def get_current_user():
     return jsonify({
         'success': True,

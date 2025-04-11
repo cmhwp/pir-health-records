@@ -4,6 +4,7 @@ from .config.config import config
 from .models import db, login_manager
 from .utils.mongo_utils import init_mongo, mongo
 from .utils.redis_utils import init_redis, close_redis
+from .utils.jwt_utils import init_jwt_loader
 
 def create_app(config_name="development"):
     app = Flask(__name__)
@@ -15,6 +16,9 @@ def create_app(config_name="development"):
     init_mongo(app)
     init_redis(app)
     CORS(app)
+    
+    # 初始化JWT认证
+    init_jwt_loader(app)
     
     # 注册销毁函数
     app.teardown_appcontext(close_redis)
