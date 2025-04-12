@@ -80,11 +80,16 @@ class PIRQuery:
         Returns:
             混淆后的查询序列
         """
+        from flask import current_app
+        
         # 创建查询拷贝
         true_query = query_params.copy()
         
-        # 生成随机噪声查询的数量 (1-3个)
-        num_noise_queries = random.randint(1, 3)
+        # 获取配置的最大噪声查询数量，如果未配置则默认为3
+        max_noise_queries = current_app.config.get('PIR_MAX_NOISE_QUERIES', 3)
+        
+        # 生成随机噪声查询的数量 (1至max_noise_queries个)
+        num_noise_queries = random.randint(1, max_noise_queries)
         
         # 可能的查询参数种类
         possible_params = {
@@ -94,13 +99,25 @@ class PIRQuery:
             'keyword': ['感冒', '发热', '检查', '治疗', '血压', '心率', '手术', '药物', '过敏', '住院']
         }
         
+        # 获取加密强度，影响噪声查询的质量
+        encryption_strength = current_app.config.get('PIR_ENCRYPTION_STRENGTH', 'medium')
+        
         # 生成噪声查询
         noise_queries = []
         for _ in range(num_noise_queries):
             noise_query = {}
             
-            # 随机选择1-3个参数
-            num_params = random.randint(1, 3)
+            # 根据加密强度调整参数数量
+            if encryption_strength == 'high':
+                # 高强度：更多的参数，更像真实查询
+                num_params = random.randint(2, min(4, len(possible_params)))
+            elif encryption_strength == 'medium':
+                # 中等强度：适中数量的参数
+                num_params = random.randint(1, 3)
+            else:
+                # 低强度：最少的参数
+                num_params = random.randint(1, 2)
+                
             params_to_include = random.sample(list(possible_params.keys()), num_params)
             
             for param in params_to_include:
@@ -121,7 +138,9 @@ class PIRQuery:
         return {
             'queries': all_queries,
             'index_hash': index_hash,
-            'true_index': PIRQuery.encrypt_index(true_query_index, index_hash)
+            'true_index': PIRQuery.encrypt_index(true_query_index, index_hash),
+            'noise_count': num_noise_queries,  # 返回噪声查询数量，用于记录
+            'encryption_strength': encryption_strength  # 返回使用的加密强度
         }
     
     @staticmethod
@@ -297,6 +316,8 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
     Returns:
         健康记录列表，查询元数据
     """
+    from flask import current_app
+    
     # 基础查询条件
     query = {'patient_id': patient_id}
     
@@ -324,6 +345,12 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
     
     # 是否使用隐匿查询
     if is_anonymous:
+        # 获取当前PIR设置
+        pir_settings = {
+            'max_noise_queries': current_app.config.get('PIR_MAX_NOISE_QUERIES', 3),
+            'encryption_strength': current_app.config.get('PIR_ENCRYPTION_STRENGTH', 'high')
+        }
+        
         # 混淆查询
         obfuscated_query = PIRQuery.obfuscate_query(query_params, patient_id)
         
@@ -388,12 +415,28 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
             if i == true_index:
                 real_results = results
         
+        # 获取实际使用的噪声查询数量
+        noise_count = obfuscated_query.get('noise_count', len(obfuscated_query['queries']) - 1)
+        encryption_strength = obfuscated_query.get('encryption_strength', pir_settings['encryption_strength'])
+        
         # 记录查询历史（仅记录真实查询）
-        record_query_history(patient_id, 'pir_query', query_params, is_anonymous=True)
+        record_query_history(
+            patient_id, 
+            'pir_query', 
+            query_params, 
+            is_anonymous=True,
+            pir_settings={
+                'noise_queries': noise_count,
+                'encryption_strength': encryption_strength,
+                'max_configured_noise': pir_settings['max_noise_queries']
+            }
+        )
         
         return real_results, {
             'pir_metadata': {
                 'total_queries': len(obfuscated_query['queries']),
+                'noise_queries': noise_count,
+                'encryption_strength': encryption_strength,
                 'index_hash': obfuscated_query['index_hash']
             }
         }
@@ -428,7 +471,7 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
         
         return results, {'standard_query': True}
 
-def record_query_history(patient_id, query_type, query_params, is_anonymous=False):
+def record_query_history(patient_id, query_type, query_params, is_anonymous=False, pir_settings=None):
     """
     记录查询历史
     
@@ -437,6 +480,7 @@ def record_query_history(patient_id, query_type, query_params, is_anonymous=Fals
         query_type: 查询类型
         query_params: 查询参数
         is_anonymous: 是否匿名查询
+        pir_settings: PIR设置信息
     """
     query_history = {
         'user_id': patient_id,
@@ -445,5 +489,9 @@ def record_query_history(patient_id, query_type, query_params, is_anonymous=Fals
         'is_anonymous': is_anonymous,
         'query_time': datetime.now()
     }
+    
+    # 加入PIR设置信息
+    if pir_settings:
+        query_history['pir_settings'] = pir_settings
     
     mongo.db.query_history.insert_one(query_history) 
