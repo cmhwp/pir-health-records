@@ -24,6 +24,7 @@ class User(db.Model, UserMixin):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    last_login_at = db.Column(db.DateTime, nullable=True)
     
     # 患者特有信息
     patient_info = db.relationship('PatientInfo', backref='user', uselist=False, lazy='joined', cascade='all, delete-orphan')
@@ -53,6 +54,11 @@ class User(db.Model, UserMixin):
             return self.role.value == role
         return self.role == role
     
+    def update_last_login(self):
+        """更新用户的最后登录时间"""
+        self.last_login_at = datetime.now()
+        db.session.commit()
+    
     def to_dict(self):
         data = {
             'id': self.id,
@@ -64,7 +70,8 @@ class User(db.Model, UserMixin):
             'avatar': self.avatar,
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None
         }
         
         # 根据角色添加额外信息

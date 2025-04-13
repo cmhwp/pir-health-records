@@ -116,6 +116,30 @@ def create_health_record():
             )
             db.session.add(record_file)
         
+        # 记录创建健康记录日志
+        from ..models.log import SystemLog, LogType
+        import json
+        
+        log = SystemLog(
+            user_id=current_user.id,
+            log_type=LogType.RECORD,
+            message=f'用户创建了健康记录: {record_data.get("title")}',
+            details=json.dumps({
+                'user_id': current_user.id,
+                'username': current_user.username,
+                'record_id': str(mongo_id),
+                'sql_id': record.id,
+                'record_type': record_data.get('record_type'),
+                'title': record_data.get('title'),
+                'visibility': record_data.get('visibility', 'private'),
+                'file_count': len(file_info),
+                'ip_address': request.remote_addr,
+                'creation_time': datetime.now().isoformat()
+            }),
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(log)
         db.session.commit()
         
         return jsonify({
@@ -473,75 +497,113 @@ def update_health_record(record_id):
 @login_required
 def delete_health_record(record_id):
     try:
-        # 从MongoDB获取记录
-        try:
-            mongo_id = format_mongo_id(record_id)
-            if not mongo_id:
-                return jsonify({
-                    'success': False,
-                    'message': '无效的记录ID'
-                }), 400
-        except:
+        # 查找记录
+        mongo_id = format_mongo_id(record_id)
+        if not mongo_id:
             return jsonify({
                 'success': False,
                 'message': '无效的记录ID'
             }), 400
-            
-        mongo_db = get_mongo_db()
-        record = mongo_db.health_records.find_one({'_id': mongo_id})
-            
+        
+        # 获取记录信息
+        record = get_mongo_health_record(mongo_id)
         if not record:
             return jsonify({
                 'success': False,
                 'message': '记录不存在'
             }), 404
         
-        # 检查是否有权限删除（只有患者自己或管理员可以删除）
+        # 检查权限
         if str(record['patient_id']) != str(current_user.id) and not current_user.has_role(Role.ADMIN):
             return jsonify({
                 'success': False,
                 'message': '没有权限删除此记录'
             }), 403
         
-        # 首先删除MySQL中的记录
-        sql_record = HealthRecord.query.filter_by(mongo_id=record_id).first()
-        if sql_record:
-            # 删除相关文件记录
-            RecordFile.query.filter_by(record_id=sql_record.id).delete()
-            
-            # 删除查询历史
-            QueryHistory.query.filter_by(record_id=sql_record.id).delete()
-            
-            # 删除共享记录
-            SharedRecord.query.filter_by(record_id=sql_record.id).delete()
-            
-            # 删除MySQL记录
-            db.session.delete(sql_record)
-            db.session.commit()
+        # 保存记录信息以便日志记录
+        record_info = {
+            'record_id': str(record['_id']),
+            'title': record.get('title', ''),
+            'record_type': record.get('record_type', ''),
+            'patient_id': str(record.get('patient_id', '')),
+            'creation_time': str(record.get('creation_time', ''))
+        }
         
-        # 删除相关物理文件
-        if 'files' in record and record['files']:
-            for file in record['files']:
-                file_path = os.path.join(UPLOAD_FOLDER, file.get('file_path'))
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+        # 获取关联的SQL记录
+        sql_record = HealthRecord.query.filter_by(mongo_id=str(mongo_id)).first()
+        sql_id = sql_record.id if sql_record else None
         
         # 删除MongoDB记录
-        mongo_db.health_records.delete_one({'_id': mongo_id})
+        mongo_db = get_mongo_db()
         
-        # 删除MongoDB中的查询历史
-        mongo_db.query_history.delete_many({'record_id': record_id})
+        # 备份到已删除集合
+        record['deletion_time'] = datetime.now()
+        record['deleted_by'] = current_user.id
+        record['deletion_reason'] = request.args.get('reason', '用户删除')
+        
+        mongo_db.health_records_deleted.insert_one(record)
+        result = mongo_db.health_records.delete_one({'_id': mongo_id})
+        
+        if result.deleted_count == 0:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在或已被删除'
+            }), 404
+        
+        # 删除SQL记录及关联的文件
+        if sql_record:
+            # 获取关联的文件
+            files = RecordFile.query.filter_by(record_id=sql_record.id).all()
+            
+            # 删除物理文件
+            for file in files:
+                try:
+                    file_path = os.path.join(UPLOAD_FOLDER, file.file_path)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    current_app.logger.error(f"删除文件失败: {str(e)}")
+            
+            # 删除SQL记录及关联文件记录
+            RecordFile.query.filter_by(record_id=sql_record.id).delete()
+            SharedRecord.query.filter_by(record_id=sql_record.id).delete()
+            db.session.delete(sql_record)
+        
+        # 记录删除健康记录日志
+        from ..models.log import SystemLog, LogType
+        
+        log = SystemLog(
+            user_id=current_user.id,
+            log_type=LogType.RECORD,
+            message=f'用户删除了健康记录: {record_info["title"]}',
+            details=json.dumps({
+                'user_id': current_user.id,
+                'username': current_user.username,
+                'record_info': record_info,
+                'sql_id': sql_id,
+                'deletion_reason': request.args.get('reason', '用户删除'),
+                'ip_address': request.remote_addr,
+                'deletion_time': datetime.now().isoformat()
+            }),
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(log)
+        db.session.commit()
         
         return jsonify({
             'success': True,
-            'message': '健康记录删除成功'
+            'message': '记录已成功删除',
+            'data': {
+                'record_id': str(mongo_id)
+            }
         })
     except Exception as e:
         current_app.logger.error(f"删除健康记录失败: {str(e)}")
         db.session.rollback()
         return jsonify({
             'success': False,
-            'message': f'删除健康记录失败: {str(e)}'
+            'message': f'删除记录失败: {str(e)}'
         }), 500
 
 # 获取健康数据统计信息
@@ -797,144 +859,216 @@ def get_pir_history():
 @login_required
 def share_health_record(record_id):
     try:
-        # 获取共享参数
         data = request.json
-        if not data or not data.get('shared_with'):
+        if not data or not data.get('share_with_id') or not data.get('permission'):
             return jsonify({
                 'success': False,
-                'message': '缺少必要参数'
+                'message': '缺少必要字段 (share_with_id, permission)'
+            }), 400
+        
+        # 查找记录
+        mongo_id = format_mongo_id(record_id)
+        if not mongo_id:
+            return jsonify({
+                'success': False,
+                'message': '无效的记录ID'
             }), 400
             
-        # 首先尝试通过MongoDB ID查找记录
-        mongo_id = None
-        sql_record = None
-        
-        # 检查是否是MongoDB ID格式
-        try:
-            mongo_id = format_mongo_id(record_id)
-        except:
-            pass
-            
-        if mongo_id:
-            # 通过MongoDB ID查找MySQL索引记录
-            sql_record = HealthRecord.query.filter_by(mongo_id=record_id).first()
-            
-            # 如果没找到索引记录，尝试从MongoDB获取并创建索引
-            if not sql_record:
-                mongo_db = get_mongo_db()
-                mongo_record = mongo_db.health_records.find_one({'_id': mongo_id})
-                
-                if mongo_record:
-                    sql_record = HealthRecord.from_mongo_doc(mongo_record)
-                    db.session.add(sql_record)
-                    db.session.commit()
-        else:
-            # 尝试作为SQL ID处理
-            try:
-                sql_id = int(record_id)
-                sql_record = HealthRecord.query.get(sql_id)
-                if sql_record and sql_record.mongo_id:
-                    mongo_id = format_mongo_id(sql_record.mongo_id)
-            except:
-                pass
-        
-        # 验证记录存在
+        sql_record = HealthRecord.query.filter_by(mongo_id=str(mongo_id)).first()
         if not sql_record:
             return jsonify({
                 'success': False,
                 'message': '记录不存在'
             }), 404
             
-        # 验证记录属于当前用户
-        if sql_record.patient_id != current_user.id:
+        # 检查记录所有权
+        if sql_record.patient_id != current_user.id and not current_user.has_role(Role.ADMIN):
             return jsonify({
                 'success': False,
-                'message': '您没有权限共享此记录'
+                'message': '只有记录所有者可以分享记录'
             }), 403
             
-        # 获取MongoDB中的详细记录
-        mongo_record = sql_record.get_mongo_data()
-        if not mongo_record:
+        # 检查分享目标用户是否存在
+        target_user = User.query.get(data['share_with_id'])
+        if not target_user:
             return jsonify({
                 'success': False,
-                'message': '记录不存在或已被删除'
+                'message': '目标用户不存在'
             }), 404
             
-        # 验证共享对象用户ID
-        shared_with_id = data.get('shared_with')
-        shared_with_user = User.query.get(shared_with_id)
-        if not shared_with_user:
+        # 不能与自己分享
+        if target_user.id == current_user.id:
             return jsonify({
                 'success': False,
-                'message': '共享对象用户不存在'
-            }), 404
+                'message': '不能与自己分享记录'
+            }), 400
             
-        # 验证是否已经共享给该用户
+        # 检查记录是否已经与该用户分享
         existing_share = SharedRecord.query.filter_by(
             record_id=sql_record.id,
-            owner_id=current_user.id,
-            shared_with=shared_with_id
+            shared_with_id=target_user.id
         ).first()
         
         if existing_share:
+            # 更新权限
+            old_permission = existing_share.permission
+            try:
+                permission = SharePermission(data['permission'])
+                existing_share.permission = permission
+                existing_share.updated_at = datetime.now()
+                
+                # 记录更新共享权限的日志
+                from ..models.log import SystemLog, LogType
+                
+                log = SystemLog(
+                    user_id=current_user.id,
+                    log_type=LogType.RECORD,
+                    message=f'用户更新了记录共享权限',
+                    details=json.dumps({
+                        'owner_id': current_user.id,
+                        'owner_username': current_user.username,
+                        'shared_with_id': target_user.id,
+                        'shared_with_username': target_user.username,
+                        'record_id': str(mongo_id),
+                        'sql_id': sql_record.id,
+                        'old_permission': str(old_permission),
+                        'new_permission': str(permission),
+                        'ip_address': request.remote_addr,
+                        'update_time': datetime.now().isoformat()
+                    }),
+                    ip_address=request.remote_addr,
+                    user_agent=request.user_agent.string if request.user_agent else None
+                )
+                db.session.add(log)
+                db.session.commit()
+                
+                # 创建通知
+                notification = Notification(
+                    user_id=target_user.id,
+                    type=NotificationType.RECORD_SHARE_UPDATE,
+                    message=f'{current_user.username}更新了与您共享的健康记录权限',
+                    data=json.dumps({
+                        'record_id': str(mongo_id),
+                        'record_title': sql_record.title,
+                        'sharer_id': current_user.id,
+                        'sharer_name': current_user.username,
+                        'permission': str(permission)
+                    })
+                )
+                db.session.add(notification)
+                db.session.commit()
+                
+                return jsonify({
+                    'success': True,
+                    'message': '共享权限已更新',
+                    'data': {
+                        'share_id': existing_share.id,
+                        'permission': str(permission)
+                    }
+                })
+            except ValueError:
+                return jsonify({
+                    'success': False,
+                    'message': '无效的权限值'
+                }), 400
+        
+        # 创建新的共享记录
+        try:
+            permission = SharePermission(data['permission'])
+            expiry = None
+            
+            if data.get('expiry_days'):
+                try:
+                    days = int(data['expiry_days'])
+                    if days > 0:
+                        expiry = datetime.now() + timedelta(days=days)
+                except ValueError:
+                    pass
+                    
+            # 创建共享记录
+            shared_record = SharedRecord(
+                record_id=sql_record.id,
+                owner_id=current_user.id,
+                shared_with_id=target_user.id,
+                permission=permission,
+                expiry=expiry,
+                access_key=secrets.token_urlsafe(16)
+            )
+            db.session.add(shared_record)
+            
+            # 记录创建共享记录的日志
+            from ..models.log import SystemLog, LogType
+            
+            log = SystemLog(
+                user_id=current_user.id,
+                log_type=LogType.RECORD,
+                message=f'用户分享了健康记录',
+                details=json.dumps({
+                    'owner_id': current_user.id,
+                    'owner_username': current_user.username,
+                    'shared_with_id': target_user.id,
+                    'shared_with_username': target_user.username,
+                    'record_id': str(mongo_id),
+                    'sql_id': sql_record.id,
+                    'record_title': sql_record.title,
+                    'permission': str(permission),
+                    'expiry': expiry.isoformat() if expiry else None,
+                    'ip_address': request.remote_addr,
+                    'share_time': datetime.now().isoformat()
+                }),
+                ip_address=request.remote_addr,
+                user_agent=request.user_agent.string if request.user_agent else None
+            )
+            db.session.add(log)
+            
+            # 创建通知
+            notification = Notification(
+                user_id=target_user.id,
+                type=NotificationType.RECORD_SHARED,
+                message=f'{current_user.username}与您共享了一份健康记录',
+                data=json.dumps({
+                    'record_id': str(mongo_id),
+                    'record_title': sql_record.title,
+                    'sharer_id': current_user.id,
+                    'sharer_name': current_user.username,
+                    'permission': str(permission),
+                    'share_id': shared_record.id  # 这里会在commit后自动填充
+                })
+            )
+            db.session.add(notification)
+            db.session.commit()
+            
+            # 更新通知数据，保证sharedRecord.id已经存在
+            notification_data = json.loads(notification.data)
+            notification_data['share_id'] = shared_record.id
+            notification.data = json.dumps(notification_data)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': '记录分享成功',
+                'data': {
+                    'share_id': shared_record.id,
+                    'record_id': str(mongo_id),
+                    'shared_with': target_user.username,
+                    'permission': str(permission),
+                    'access_key': shared_record.access_key,
+                    'expiry': expiry.isoformat() if expiry else None
+                }
+            })
+            
+        except ValueError:
             return jsonify({
                 'success': False,
-                'message': '已经与该用户共享此记录'
+                'message': '无效的权限值'
             }), 400
             
-        # 解析权限
-        try:
-            permission_str = data.get('permission', 'view').lower()
-            permission = SharePermission(permission_str)
-        except ValueError:
-            permission = SharePermission.VIEW
-            
-        # 解析过期时间
-        expires_at = None
-        if 'expires_days' in data and data['expires_days'] > 0:
-            expires_at = datetime.now() + timedelta(days=data['expires_days'])
-            
-        # 生成访问密钥
-        access_key = secrets.token_urlsafe(32)
-            
-        # 创建共享记录
-        shared_record = SharedRecord(
-            record_id=sql_record.id,
-            mongo_record_id=sql_record.mongo_id,
-            owner_id=current_user.id,
-            shared_with=shared_with_id,
-            permission=permission,
-            expires_at=expires_at,
-            access_key=access_key
-        )
-        
-        # 创建通知
-        notification = Notification(
-            user_id=shared_with_id,
-            sender_id=current_user.id,
-            notification_type=NotificationType.RECORD_SHARED,
-            title="有新的健康记录与您共享",
-            message=f"{current_user.username} 共享了一条 {sql_record.record_type.value} 类型的健康记录: {sql_record.title}",
-            related_id=str(sql_record.id),
-            expires_at=expires_at
-        )
-        
-        db.session.add(shared_record)
-        db.session.add(notification)
-        db.session.commit()
-        
-        return jsonify({
-            'success': True,
-            'message': '记录共享成功',
-            'data': shared_record.to_dict()
-        }), 201
-            
     except Exception as e:
+        current_app.logger.error(f"分享健康记录失败: {str(e)}")
         db.session.rollback()
-        current_app.logger.error(f"共享健康记录失败: {str(e)}")
         return jsonify({
             'success': False,
-            'message': f'共享健康记录失败: {str(e)}'
+            'message': f'分享记录失败: {str(e)}'
         }), 500
 
 # 获取我共享的记录列表
@@ -1203,12 +1337,12 @@ def view_shared_record(shared_id):
             'message': f'查看共享记录失败: {str(e)}'
         }), 500
 
-# 撤销共享
+# 撤销共享记录
 @health_bp.route('/shared/<shared_id>', methods=['DELETE'])
 @login_required
 def revoke_shared_record(shared_id):
     try:
-        # 获取共享记录
+        # 查找共享记录
         shared_record = SharedRecord.query.get(shared_id)
         if not shared_record:
             return jsonify({
@@ -1216,28 +1350,79 @@ def revoke_shared_record(shared_id):
                 'message': '共享记录不存在'
             }), 404
             
-        # 验证权限
-        if shared_record.owner_id != current_user.id:
+        # 检查权限（只有记录所有者或管理员可以撤销共享）
+        if shared_record.owner_id != current_user.id and not current_user.has_role(Role.ADMIN):
             return jsonify({
                 'success': False,
-                'message': '您没有权限撤销此共享记录'
+                'message': '没有权限撤销此共享'
             }), 403
             
+        # 获取相关信息以便日志记录
+        record = HealthRecord.query.get(shared_record.record_id)
+        shared_with_user = User.query.get(shared_record.shared_with_id)
+        
+        revoke_info = {
+            'share_id': shared_record.id,
+            'record_id': shared_record.record_id,
+            'mongo_id': record.mongo_id if record else None,
+            'record_title': record.title if record else 'Unknown',
+            'owner_id': shared_record.owner_id,
+            'owner_username': current_user.username,
+            'shared_with_id': shared_record.shared_with_id,
+            'shared_with_username': shared_with_user.username if shared_with_user else 'Unknown',
+            'permission': str(shared_record.permission),
+            'created_at': shared_record.created_at.isoformat() if shared_record.created_at else None,
+            'expiry': shared_record.expiry.isoformat() if shared_record.expiry else None
+        }
+        
+        # 创建撤销通知
+        if shared_with_user:
+            notification = Notification(
+                user_id=shared_record.shared_with_id,
+                type=NotificationType.RECORD_SHARE_REVOKED,
+                message=f'{current_user.username}撤销了与您共享的健康记录',
+                data=json.dumps({
+                    'record_id': record.mongo_id if record else None,
+                    'record_title': record.title if record else 'Unknown',
+                    'sharer_id': shared_record.owner_id,
+                    'sharer_name': current_user.username
+                })
+            )
+            db.session.add(notification)
+        
         # 删除共享记录
         db.session.delete(shared_record)
+        
+        # 记录撤销共享的日志
+        from ..models.log import SystemLog, LogType
+        import json
+        
+        log = SystemLog(
+            user_id=current_user.id,
+            log_type=LogType.RECORD,
+            message=f'用户撤销了健康记录共享',
+            details=json.dumps({
+                'revoke_info': revoke_info,
+                'ip_address': request.remote_addr,
+                'revoke_time': datetime.now().isoformat(),
+                'reason': request.args.get('reason', '用户撤销共享')
+            }),
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(log)
         db.session.commit()
         
         return jsonify({
             'success': True,
-            'message': '共享记录已撤销'
+            'message': '共享已成功撤销'
         })
-        
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"撤销共享记录失败: {str(e)}")
         return jsonify({
             'success': False,
-            'message': f'撤销共享记录失败: {str(e)}'
+            'message': f'撤销共享失败: {str(e)}'
         }), 500
 
 # =========================== 高级搜索功能 ===========================
