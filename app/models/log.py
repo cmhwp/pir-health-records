@@ -27,7 +27,7 @@ class Log:
             'action': action,
             'data': data,
             'user_id': user_id,
-            'timestamp': datetime.utcnow()
+            'timestamp': datetime.now()
         }
         result = mongo_db.logs.insert_one(log_data)
         return result.inserted_id

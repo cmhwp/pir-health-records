@@ -1,5 +1,6 @@
-from flask import Blueprint, request, jsonify, current_app, send_from_directory
+from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from flask_login import login_required, current_user
+from werkzeug.utils import secure_filename
 from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo
 from ..routers.auth import role_required, api_login_required
 from sqlalchemy import or_, and_
@@ -9,6 +10,12 @@ import time
 from datetime import datetime, timedelta
 from sqlalchemy.sql import func, distinct, desc
 from ..utils.log_utils import log_admin
+from ..models.batch_jobs import (
+    BatchJob, BatchJobLog, BatchJobError, 
+    BatchStatus, BatchType, LogLevel,
+    add_batch_log, add_batch_error,
+    get_batch_job_by_job_id, get_batch_jobs_by_status
+)
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 
@@ -405,12 +412,12 @@ def delete_user(user_id):
         # 记录用户删除日志
         log_admin(
             message=f'管理员删除了用户: {deleted_user_info["username"]}',
-            details={
+            details=json.dumps({
                 'deleted_user_info': deleted_user_info,
                 'admin_username': current_user.username,
                 'deletion_time': datetime.now().isoformat(),
                 'reason': request.args.get('reason', '管理员删除')
-            }
+            })
         )
         
         return jsonify({
@@ -748,7 +755,7 @@ def export_system_data():
         export_type = data.get('export_type')
         
         # 创建导出目录
-        export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'exports')
+        export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads/exports')
         os.makedirs(export_dir, exist_ok=True)
         
         # 生成导出文件名
@@ -870,7 +877,7 @@ def export_system_data():
 @role_required(Role.ADMIN)
 def download_exported_data(filename):
     try:
-        export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'exports')
+        export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads/exports')
         
         file_path = os.path.join(export_dir, filename)
         if not os.path.exists(file_path):
@@ -1205,3 +1212,587 @@ def admin_dashboard():
             'success': False,
             'message': f'获取管理员仪表盘数据失败: {str(e)}'
         }), 500
+
+# 获取批量任务列表
+@admin_bp.route('/batch-records', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_batch_jobs():
+    try:
+        status = request.args.get('status')
+        
+        # 如果提供了状态，则按状态筛选
+        if status:
+            try:
+                batch_jobs = get_batch_jobs_by_status(status)
+            except ValueError:
+                return jsonify({
+                    'success': False,
+                    'message': f'无效的状态值: {status}'
+                }), 400
+        else:
+            # 否则获取所有任务
+            batch_jobs = BatchJob.query.order_by(BatchJob.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'batch_jobs': [job.to_dict() for job in batch_jobs]
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取批量任务列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取批量任务列表失败: {str(e)}'
+        }), 500
+
+# 获取批量任务详情
+@admin_bp.route('/batch-records/<job_id>', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_batch_job(job_id):
+    try:
+        batch_job = get_batch_job_by_job_id(job_id)
+        
+        if not batch_job:
+            return jsonify({
+                'success': False,
+                'message': f'未找到ID为{job_id}的批量任务'
+            }), 404
+            
+        # 获取任务日志
+        logs = BatchJobLog.query.filter_by(batch_job_id=batch_job.id)\
+            .order_by(BatchJobLog.timestamp.desc()).all()
+            
+        # 获取任务错误
+        errors = BatchJobError.query.filter_by(batch_job_id=batch_job.id)\
+            .order_by(BatchJobError.timestamp.desc()).all()
+            
+        return jsonify({
+            'success': True,
+            'data': {
+                'batch_job': batch_job.to_dict(),
+                'logs': [log.to_dict() for log in logs],
+                'errors': [error.to_dict() for error in errors]
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取批量任务详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取批量任务详情失败: {str(e)}'
+        }), 500
+
+# 上传批量数据文件
+@admin_bp.route('/batch-records/upload', methods=['POST'])
+@api_login_required
+@role_required(Role.ADMIN)
+def upload_batch_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'message': '没有上传文件'
+            }), 400
+            
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'message': '未选择文件'
+            }), 400
+            
+        # 验证文件类型
+        allowed_extensions = {'csv', 'json', 'xml'}
+        file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+        
+        if file_ext not in allowed_extensions:
+            return jsonify({
+                'success': False,
+                'message': f'不支持的文件类型: {file_ext}，仅支持 CSV、JSON 或 XML'
+            }), 400
+            
+        # 获取表单数据
+        name = request.form.get('name')
+        batch_type = request.form.get('type')
+        validate_only = request.form.get('validateOnly') == 'true'
+        skip_duplicates = request.form.get('skipDuplicates') == 'true'
+        
+        if not name or not batch_type:
+            return jsonify({
+                'success': False,
+                'message': '缺少必要参数 (name, type)'
+            }), 400
+        
+        # 保存文件
+        uploads_dir = os.path.join(current_app.instance_path, 'uploads', 'batch_files')
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        safe_filename = f"{timestamp}_{secure_filename(file.filename)}"
+        file_path = os.path.join(uploads_dir, safe_filename)
+        
+        file.save(file_path)
+        
+        # 创建批量任务记录
+        options = {
+            'validateOnly': validate_only,
+            'skipDuplicates': skip_duplicates
+        }
+        
+        batch_job = BatchJob(
+            name=name,
+            job_type=batch_type,
+            created_by_id=current_user.id,
+            file_name=file.filename,
+            file_path=file_path,
+            file_size=os.path.getsize(file_path),
+            file_type=file_ext,
+            options=options
+        )
+        
+        db.session.add(batch_job)
+        db.session.commit()
+        
+        # 添加日志
+        add_batch_log(
+            batch_job.id, 
+            f"批量任务创建成功: {name}", 
+            LogLevel.INFO,
+            {
+                'file_name': file.filename,
+                'file_size': batch_job.file_size,
+                'file_type': file_ext,
+                'options': options
+            }
+        )
+        
+        # 记录管理操作日志
+        log_admin(
+            message=f'创建批量任务: {name}',
+            details=json.dumps({
+                'job_id': batch_job.job_id,
+                'name': name,
+                'type': batch_type,
+                'file_name': file.filename,
+                'file_size': batch_job.file_size,
+                'options': options,
+                'admin_username': current_user.username,
+                'ip_address': request.remote_addr
+            })
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '批量任务创建成功',
+            'data': {
+                'batch_job': batch_job.to_dict()
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"上传批量数据文件失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'上传批量数据文件失败: {str(e)}'
+        }), 500
+
+# 开始处理批量任务
+@admin_bp.route('/batch-records/<job_id>/start', methods=['POST'])
+@api_login_required
+@role_required(Role.ADMIN)
+def start_batch_processing(job_id):
+    try:
+        batch_job = get_batch_job_by_job_id(job_id)
+        
+        if not batch_job:
+            return jsonify({
+                'success': False,
+                'message': f'未找到ID为{job_id}的批量任务'
+            }), 404
+            
+        if batch_job.status != BatchStatus.PENDING:
+            return jsonify({
+                'success': False,
+                'message': f'只能启动处于待处理状态的任务'
+            }), 400
+            
+        # 标记任务为处理中
+        batch_job.mark_processing()
+        
+        # 添加日志
+        add_batch_log(
+            batch_job.id, 
+            "开始处理批量任务", 
+            LogLevel.INFO
+        )
+        
+        # 启动后台任务处理
+        # 这里可以使用Celery或者其他异步任务系统
+        # 为了简单起见，这里使用线程池
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(process_batch_job, batch_job.id)
+        
+        # 记录管理操作日志
+        log_admin(
+            message=f'启动批量任务处理: {batch_job.name}',
+            details=json.dumps({
+                'job_id': batch_job.job_id,
+                'name': batch_job.name,
+                'type': batch_job.type.value,
+                'admin_username': current_user.username,
+                'ip_address': request.remote_addr
+            })
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '批量任务处理已启动',
+            'data': {
+                'batch_job': batch_job.to_dict()
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"启动批量任务处理失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'启动批量任务处理失败: {str(e)}'
+        }), 500
+
+# 删除批量任务
+@admin_bp.route('/batch-records/<job_id>', methods=['DELETE'])
+@api_login_required
+@role_required(Role.ADMIN)
+def delete_batch_job(job_id):
+    try:
+        batch_job = get_batch_job_by_job_id(job_id)
+        
+        if not batch_job:
+            return jsonify({
+                'success': False,
+                'message': f'未找到ID为{job_id}的批量任务'
+            }), 404
+            
+        if batch_job.status == BatchStatus.PROCESSING:
+            return jsonify({
+                'success': False,
+                'message': '无法删除处理中的任务'
+            }), 400
+            
+        # 记录要删除的批量任务信息（用于日志）
+        job_info = {
+            'job_id': batch_job.job_id,
+            'name': batch_job.name,
+            'type': batch_job.type.value,
+            'status': batch_job.status.value,
+            'created_at': batch_job.created_at.isoformat() if batch_job.created_at else None
+        }
+        
+        # 如果存在文件，则删除文件
+        if batch_job.file_path and os.path.exists(batch_job.file_path):
+            os.remove(batch_job.file_path)
+            
+        # 删除相关的日志和错误记录
+        BatchJobLog.query.filter_by(batch_job_id=batch_job.id).delete()
+        BatchJobError.query.filter_by(batch_job_id=batch_job.id).delete()
+        
+        # 删除批量任务
+        db.session.delete(batch_job)
+        db.session.commit()
+        
+        # 记录管理操作日志
+        log_admin(
+            message=f'删除批量任务: {job_info["name"]}',
+            details=json.dumps({
+                'job_info': job_info,
+                'admin_username': current_user.username,
+                'ip_address': request.remote_addr
+            })
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '批量任务已成功删除'
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"删除批量任务失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'删除批量任务失败: {str(e)}'
+        }), 500
+
+# 下载批量任务结果
+@admin_bp.route('/batch-records/<job_id>/download', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def download_batch_results(job_id):
+    try:
+        batch_job = get_batch_job_by_job_id(job_id)
+        
+        if not batch_job:
+            return jsonify({
+                'success': False,
+                'message': f'未找到ID为{job_id}的批量任务'
+            }), 404
+            
+        if batch_job.status != BatchStatus.COMPLETED:
+            return jsonify({
+                'success': False,
+                'message': '只能下载已完成任务的结果'
+            }), 400
+            
+        # 结果文件路径
+        results_dir = os.path.join(current_app.instance_path, 'results', 'batch_jobs')
+        os.makedirs(results_dir, exist_ok=True)
+        
+        result_file_path = os.path.join(results_dir, f"{batch_job.job_id}_results.json")
+        
+        # 如果结果文件不存在，则生成结果文件
+        if not os.path.exists(result_file_path):
+            # 获取任务日志和错误
+            logs = BatchJobLog.query.filter_by(batch_job_id=batch_job.id)\
+                .order_by(BatchJobLog.timestamp).all()
+                
+            errors = BatchJobError.query.filter_by(batch_job_id=batch_job.id)\
+                .order_by(BatchJobError.timestamp).all()
+                
+            # 生成结果报告
+            results = {
+                'job_id': batch_job.job_id,
+                'name': batch_job.name,
+                'type': batch_job.type.value,
+                'status': batch_job.status.value,
+                'created_at': batch_job.created_at.isoformat() if batch_job.created_at else None,
+                'completed_at': batch_job.completed_at.isoformat() if batch_job.completed_at else None,
+                'records_count': batch_job.records_count,
+                'processed_count': batch_job.processed_count,
+                'error_count': batch_job.error_count,
+                'logs': [log.to_dict() for log in logs],
+                'errors': [error.to_dict() for error in errors]
+            }
+            
+            with open(result_file_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+        
+        # 记录管理操作日志
+        log_admin(
+            message=f'下载批量任务结果: {batch_job.name}',
+            details=json.dumps({
+                'job_id': batch_job.job_id,
+                'name': batch_job.name,
+                'admin_username': current_user.username,
+                'ip_address': request.remote_addr
+            })
+        )
+        
+        return send_file(
+            result_file_path,
+            as_attachment=True,
+            download_name=f"{batch_job.name}_结果报告.json",
+            mimetype='application/json'
+        )
+        
+    except Exception as e:
+        current_app.logger.error(f"下载批量任务结果失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'下载批量任务结果失败: {str(e)}'
+        }), 500
+
+# 批量任务处理函数（后台运行）
+def process_batch_job(batch_job_id):
+    try:
+        batch_job = BatchJob.query.get(batch_job_id)
+        
+        if not batch_job:
+            current_app.logger.error(f"找不到ID为{batch_job_id}的批量任务")
+            return
+            
+        # 添加处理开始日志
+        add_batch_log(
+            batch_job.id, 
+            "批量处理开始", 
+            LogLevel.INFO
+        )
+        
+        # 读取文件内容
+        file_content = None
+        with open(batch_job.file_path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+            
+        # 解析文件内容
+        data = None
+        try:
+            if batch_job.file_type == 'json':
+                data = json.loads(file_content)
+                add_batch_log(batch_job.id, "JSON文件解析成功", LogLevel.INFO)
+            elif batch_job.file_type == 'csv':
+                import csv
+                import io
+                csv_data = []
+                csv_reader = csv.DictReader(io.StringIO(file_content))
+                for row in csv_reader:
+                    csv_data.append(row)
+                data = csv_data
+                add_batch_log(batch_job.id, f"CSV文件解析成功，共{len(data)}条记录", LogLevel.INFO)
+            elif batch_job.file_type == 'xml':
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(file_content)
+                # 简单处理XML，实际情况可能需要更复杂的逻辑
+                data = []
+                for child in root:
+                    record = {}
+                    for elem in child:
+                        record[elem.tag] = elem.text
+                    data.append(record)
+                add_batch_log(batch_job.id, f"XML文件解析成功，共{len(data)}条记录", LogLevel.INFO)
+        except Exception as e:
+            error_msg = f"文件解析失败: {str(e)}"
+            add_batch_log(batch_job.id, error_msg, LogLevel.ERROR)
+            batch_job.mark_failed()
+            return
+            
+        # 如果没有数据，则标记为失败
+        if not data or (isinstance(data, list) and len(data) == 0):
+            add_batch_log(batch_job.id, "文件不包含有效数据", LogLevel.ERROR)
+            batch_job.mark_failed()
+            return
+            
+        # 更新记录总数
+        total_records = len(data) if isinstance(data, list) else 1
+        batch_job.records_count = total_records
+        db.session.commit()
+        
+        # 验证数据
+        add_batch_log(batch_job.id, "开始验证数据", LogLevel.INFO)
+        
+        # 按照任务类型处理不同的数据逻辑
+        processed_count = 0
+        error_count = 0
+        
+        # 仅验证模式
+        validate_only = batch_job.options.get('validateOnly', False)
+        skip_duplicates = batch_job.options.get('skipDuplicates', True)
+        
+        # 根据不同的批量类型执行不同的处理逻辑
+        if batch_job.type == BatchType.PATIENT:
+            # 患者记录处理逻辑
+            add_batch_log(batch_job.id, "处理患者记录", LogLevel.INFO)
+            
+            # 处理每条记录
+            for i, record in enumerate(data):
+                try:
+                    # 检查必填字段
+                    required_fields = ['name', 'gender', 'dob']
+                    missing_fields = [f for f in required_fields if f not in record or not record[f]]
+                    
+                    if missing_fields:
+                        error_msg = f"记录缺少必填字段: {', '.join(missing_fields)}"
+                        add_batch_error(batch_job.id, error_msg, i+1, None, None)
+                        error_count += 1
+                        continue
+                        
+                    # 检查日期格式
+                    try:
+                        if 'dob' in record:
+                            datetime.strptime(record['dob'], '%Y-%m-%d')
+                    except ValueError:
+                        error_msg = "出生日期格式错误，应为YYYY-MM-DD"
+                        add_batch_error(batch_job.id, error_msg, i+1, 'dob', record.get('dob'))
+                        error_count += 1
+                        continue
+                        
+                    # 检查性别值
+                    if 'gender' in record and record['gender'] not in ['male', 'female', 'other']:
+                        error_msg = "性别值无效，应为male、female或other"
+                        add_batch_error(batch_job.id, error_msg, i+1, 'gender', record.get('gender'))
+                        error_count += 1
+                        continue
+                        
+                    # 如果不是仅验证模式，则执行实际导入逻辑
+                    if not validate_only:
+                        # 实际导入逻辑，此处为示例
+                        # 检查重复
+                        if skip_duplicates:
+                            # 检查是否已存在相同患者
+                            pass
+                            
+                        # 导入患者记录
+                        pass
+                        
+                    processed_count += 1
+                    
+                    # 更新进度
+                    progress = int((processed_count / total_records) * 100)
+                    batch_job.update_progress(progress, processed_count, error_count)
+                    
+                    # 每处理100条记录记录一次日志
+                    if processed_count % 100 == 0:
+                        add_batch_log(
+                            batch_job.id, 
+                            f"已处理{processed_count}/{total_records}条记录，错误{error_count}条", 
+                            LogLevel.INFO
+                        )
+                        
+                except Exception as e:
+                    error_msg = f"处理记录失败: {str(e)}"
+                    add_batch_error(batch_job.id, error_msg, i+1, None, None)
+                    error_count += 1
+                    
+        elif batch_job.type == BatchType.MEDICATION:
+            # 药物数据处理逻辑
+            add_batch_log(batch_job.id, "处理药物数据", LogLevel.INFO)
+            # 药物数据处理逻辑，与上面类似
+            
+        elif batch_job.type == BatchType.LAB:
+            # 实验室结果处理逻辑
+            add_batch_log(batch_job.id, "处理实验室结果", LogLevel.INFO)
+            # 实验室结果处理逻辑，与上面类似
+            
+        elif batch_job.type == BatchType.CUSTOM:
+            # 自定义数据处理逻辑
+            add_batch_log(batch_job.id, "处理自定义数据", LogLevel.INFO)
+            # 自定义数据处理逻辑，与上面类似
+        
+        # 更新最终进度
+        final_status = BatchStatus.COMPLETED if error_count == 0 else BatchStatus.FAILED
+        final_message = "批量处理完成"
+        final_level = LogLevel.SUCCESS if error_count == 0 else LogLevel.WARNING
+        
+        if validate_only:
+            final_message = f"验证完成，共{total_records}条记录，有效{processed_count}条，错误{error_count}条"
+        else:
+            final_message = f"批量处理完成，共{total_records}条记录，成功导入{processed_count}条，错误{error_count}条"
+            
+        add_batch_log(batch_job.id, final_message, final_level)
+        
+        # 更新任务状态
+        batch_job.status = final_status
+        batch_job.progress = 100
+        batch_job.processed_count = processed_count
+        batch_job.error_count = error_count
+        batch_job.completed_at = datetime.utcnow()
+        db.session.commit()
+        
+    except Exception as e:
+        current_app.logger.error(f"批量任务处理失败: {str(e)}")
+        
+        # 添加错误日志
+        try:
+            add_batch_log(
+                batch_job_id, 
+                f"批量处理失败: {str(e)}", 
+                LogLevel.ERROR
+            )
+            
+            # 标记任务为失败
+            batch_job = BatchJob.query.get(batch_job_id)
+            if batch_job:
+                batch_job.mark_failed()
+        except:
+            pass

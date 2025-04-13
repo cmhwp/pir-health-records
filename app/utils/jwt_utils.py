@@ -27,7 +27,7 @@ def init_jwt_loader(app):
             )
             
             # 检查令牌是否过期
-            if 'exp' in payload and datetime.utcnow().timestamp() > payload['exp']:
+            if 'exp' in payload and datetime.now().timestamp() > payload['exp']:
                 return
             
             # 获取用户并登录
@@ -66,7 +66,7 @@ def jwt_required(fn):
             )
             
             # 检查令牌是否过期
-            if 'exp' in payload and datetime.utcnow().timestamp() > payload['exp']:
+            if 'exp' in payload and datetime.now().timestamp() > payload['exp']:
                 return {
                     'success': False,
                     'message': '令牌已过期'
