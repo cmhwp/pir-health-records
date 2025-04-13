@@ -24,6 +24,7 @@ from sqlalchemy import desc, func, distinct, or_
 import math
 import secrets
 import random
+from ..utils.log_utils import log_record
 
 def check_record_access_permission(record, user):
     """检查用户是否有权限访问此记录"""
@@ -117,29 +118,19 @@ def create_health_record():
             db.session.add(record_file)
         
         # 记录创建健康记录日志
-        from ..models.log import SystemLog, LogType
-        import json
-        
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.RECORD,
+        log_record(
             message=f'用户创建了健康记录: {record_data.get("title")}',
-            details=json.dumps({
-                'user_id': current_user.id,
-                'username': current_user.username,
+            details={
                 'record_id': str(mongo_id),
                 'sql_id': record.id,
                 'record_type': record_data.get('record_type'),
                 'title': record_data.get('title'),
                 'visibility': record_data.get('visibility', 'private'),
                 'file_count': len(file_info),
-                'ip_address': request.remote_addr,
                 'creation_time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            }
         )
-        db.session.add(log)
+        
         db.session.commit()
         
         return jsonify({
@@ -570,25 +561,22 @@ def delete_health_record(record_id):
             db.session.delete(sql_record)
         
         # 记录删除健康记录日志
-        from ..models.log import SystemLog, LogType
+        from ..utils.log_utils import log_record
         
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.RECORD,
+        log_record(
             message=f'用户删除了健康记录: {record_info["title"]}',
-            details=json.dumps({
-                'user_id': current_user.id,
-                'username': current_user.username,
-                'record_info': record_info,
+            details={
+                'record_id': str(record['_id']),
+                'title': record.get('title', ''),
+                'record_type': record.get('record_type', ''),
+                'patient_id': str(record.get('patient_id', '')),
+                'creation_time': str(record.get('creation_time', '')),
                 'sql_id': sql_id,
                 'deletion_reason': request.args.get('reason', '用户删除'),
-                'ip_address': request.remote_addr,
                 'deletion_time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            }
         )
-        db.session.add(log)
+        
         db.session.commit()
         
         return jsonify({
@@ -918,13 +906,9 @@ def share_health_record(record_id):
                 existing_share.updated_at = datetime.now()
                 
                 # 记录更新共享权限的日志
-                from ..models.log import SystemLog, LogType
-                
-                log = SystemLog(
-                    user_id=current_user.id,
-                    log_type=LogType.RECORD,
+                log_record(
                     message=f'用户更新了记录共享权限',
-                    details=json.dumps({
+                    details={
                         'owner_id': current_user.id,
                         'owner_username': current_user.username,
                         'shared_with_id': target_user.id,
@@ -933,14 +917,9 @@ def share_health_record(record_id):
                         'sql_id': sql_record.id,
                         'old_permission': str(old_permission),
                         'new_permission': str(permission),
-                        'ip_address': request.remote_addr,
                         'update_time': datetime.now().isoformat()
-                    }),
-                    ip_address=request.remote_addr,
-                    user_agent=request.user_agent.string if request.user_agent else None
+                    }
                 )
-                db.session.add(log)
-                db.session.commit()
                 
                 # 创建通知
                 notification = Notification(
@@ -997,13 +976,9 @@ def share_health_record(record_id):
             db.session.add(shared_record)
             
             # 记录创建共享记录的日志
-            from ..models.log import SystemLog, LogType
-            
-            log = SystemLog(
-                user_id=current_user.id,
-                log_type=LogType.RECORD,
+            log_record(
                 message=f'用户分享了健康记录',
-                details=json.dumps({
+                details={
                     'owner_id': current_user.id,
                     'owner_username': current_user.username,
                     'shared_with_id': target_user.id,
@@ -1013,13 +988,9 @@ def share_health_record(record_id):
                     'record_title': sql_record.title,
                     'permission': str(permission),
                     'expiry': expiry.isoformat() if expiry else None,
-                    'ip_address': request.remote_addr,
                     'share_time': datetime.now().isoformat()
-                }),
-                ip_address=request.remote_addr,
-                user_agent=request.user_agent.string if request.user_agent else None
+                }
             )
-            db.session.add(log)
             
             # 创建通知
             notification = Notification(
@@ -1394,23 +1365,15 @@ def revoke_shared_record(shared_id):
         db.session.delete(shared_record)
         
         # 记录撤销共享的日志
-        from ..models.log import SystemLog, LogType
-        import json
-        
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.RECORD,
+        log_record(
             message=f'用户撤销了健康记录共享',
-            details=json.dumps({
+            details={
                 'revoke_info': revoke_info,
-                'ip_address': request.remote_addr,
-                'revoke_time': datetime.now().isoformat(),
-                'reason': request.args.get('reason', '用户撤销共享')
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+                'reason': request.args.get('reason', '用户撤销共享'),
+                'revoke_time': datetime.now().isoformat()
+            }
         )
-        db.session.add(log)
+        
         db.session.commit()
         
         return jsonify({

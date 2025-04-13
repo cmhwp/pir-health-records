@@ -8,6 +8,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from sqlalchemy.sql import func, distinct, desc
+from ..utils.log_utils import log_admin
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 
@@ -53,11 +54,7 @@ def get_users():
         users_data.append(user_dict)
     
     # 记录查询用户列表的日志
-    from ..models.log import SystemLog, LogType
-    import json
-    log = SystemLog(
-        user_id=current_user.id,
-        log_type=LogType.ADMIN,
+    log_admin(
         message=f'管理员查询用户列表',
         details=json.dumps({
             'page': page,
@@ -68,12 +65,8 @@ def get_users():
             'total_count': pagination.total,
             'admin_username': current_user.username,
             'ip_address': request.remote_addr
-        }),
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string if request.user_agent else None
+        })
     )
-    db.session.add(log)
-    db.session.commit()
     
     return jsonify({
         'success': True,
@@ -100,11 +93,7 @@ def get_user(user_id):
         user_data['last_login_formatted'] = '从未登录'
     
     # 记录查询单个用户详情的日志
-    from ..models.log import SystemLog, LogType
-    import json
-    log = SystemLog(
-        user_id=current_user.id,
-        log_type=LogType.ADMIN,
+    log_admin(
         message=f'管理员查看了用户详情: {user.username}',
         details=json.dumps({
             'viewed_user_id': user.id,
@@ -112,12 +101,8 @@ def get_user(user_id):
             'role': str(user.role),
             'admin_username': current_user.username,
             'ip_address': request.remote_addr
-        }),
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string if request.user_agent else None
+        })
     )
-    db.session.add(log)
-    db.session.commit()
     
     return jsonify({
         'success': True,
@@ -213,25 +198,17 @@ def create_user():
         db.session.commit()
         
         # 记录用户创建日志
-        from ..models.log import SystemLog, LogType
-        import json
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.ADMIN,
+        log_admin(
             message=f'管理员创建了新用户: {user.username}',
-            details=json.dumps({
+            details={
                 'created_user_id': user.id,
                 'username': user.username,
                 'email': user.email,
                 'role': str(user.role),
                 'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+                'creation_time': datetime.now().isoformat()
+            }
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': True,
@@ -373,34 +350,16 @@ def update_user(user_id):
         }
         
         # 记录用户更新日志
-        from ..models.log import SystemLog, LogType
-        import json
-        
-        # 找出发生变化的字段
-        changes = {}
-        for key in old_data:
-            if old_data[key] != new_data[key]:
-                changes[key] = {
-                    'old': old_data[key],
-                    'new': new_data[key]
-                }
-        
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.ADMIN,
+        log_admin(
             message=f'管理员更新了用户信息: {user.username}',
             details=json.dumps({
                 'user_id': user.id,
                 'username': user.username,
-                'changes': changes,
+                'changes': {key: {'old': old_data[key], 'new': new_data[key]} for key in old_data if old_data[key] != new_data[key]},
                 'admin_username': current_user.username,
                 'ip_address': request.remote_addr
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            })
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': True,
@@ -436,32 +395,23 @@ def delete_user(user_id):
             'username': user.username,
             'email': user.email,
             'role': str(user.role),
-            'created_at': user.created_at.isoformat() if user.created_at else None
+            'created_at': user.created_at.isoformat() if user.created_at else None,
+            'last_login': user.last_login_at.isoformat() if user.last_login_at else None
         }
         
         db.session.delete(user)
         db.session.commit()
         
         # 记录用户删除日志
-        from ..models.log import SystemLog, LogType
-        import json
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.ADMIN,
+        log_admin(
             message=f'管理员删除了用户: {deleted_user_info["username"]}',
-            details=json.dumps({
-                'deleted_user_id': deleted_user_info['id'],
-                'username': deleted_user_info['username'],
-                'email': deleted_user_info['email'],
-                'role': deleted_user_info['role'],
+            details={
+                'deleted_user_info': deleted_user_info,
                 'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+                'deletion_time': datetime.now().isoformat(),
+                'reason': request.args.get('reason', '管理员删除')
+            }
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': True,
@@ -702,11 +652,7 @@ def batch_manage_records():
                 deleted_count += 1
                 
             # 记录批量删除操作的日志
-            from ..models.log import SystemLog, LogType
-            import json
-            log = SystemLog(
-                user_id=current_user.id,
-                log_type=LogType.ADMIN,
+            log_admin(
                 message=f'管理员批量删除健康记录',
                 details=json.dumps({
                     'action': 'delete',
@@ -716,12 +662,8 @@ def batch_manage_records():
                     'reason': data.get('reason', '管理员批量删除'),
                     'admin_username': current_user.username,
                     'ip_address': request.remote_addr
-                }),
-                ip_address=request.remote_addr,
-                user_agent=request.user_agent.string if request.user_agent else None
+                })
             )
-            db.session.add(log)
-            db.session.commit()
                 
             return jsonify({
                 'success': True,
@@ -757,11 +699,7 @@ def batch_manage_records():
             updated_count = bulk_update_visibility(record_ids, visibility, current_user.id)
             
             # 记录批量更新可见性的日志
-            from ..models.log import SystemLog, LogType
-            import json
-            log = SystemLog(
-                user_id=current_user.id,
-                log_type=LogType.ADMIN,
+            log_admin(
                 message=f'管理员批量更新记录可见性',
                 details=json.dumps({
                     'action': 'visibility',
@@ -770,12 +708,8 @@ def batch_manage_records():
                     'new_visibility': visibility,
                     'admin_username': current_user.username,
                     'ip_address': request.remote_addr
-                }),
-                ip_address=request.remote_addr,
-                user_agent=request.user_agent.string if request.user_agent else None
+                })
             )
-            db.session.add(log)
-            db.session.commit()
             
             return jsonify({
                 'success': True,
@@ -901,22 +835,15 @@ def export_system_data():
             json.dump(export_data, f, ensure_ascii=False, indent=2, default=str)
             
         # 记录数据导出日志
-        from ..models.log import SystemLog, LogType
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.ADMIN,
+        log_admin(
             message=f'管理员导出{export_type}数据',
             details=json.dumps({
                 'export_info': export_info,
                 'admin_username': current_user.username,
                 'file_size': os.path.getsize(filepath),
                 'ip_address': request.remote_addr
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            })
         )
-        db.session.add(log)
-        db.session.commit()
             
         # 返回下载链接
         download_url = f"/api/admin/export/download/{filename}"
@@ -953,10 +880,7 @@ def download_exported_data(filename):
             }), 404
             
         # 记录下载行为
-        from ..models.log import SystemLog, LogType
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.ADMIN,
+        log_admin(
             message=f'管理员下载导出文件: {filename}',
             details=json.dumps({
                 'filename': filename,
@@ -964,12 +888,8 @@ def download_exported_data(filename):
                 'download_time': datetime.now().isoformat(),
                 'admin_username': current_user.username,
                 'ip_address': request.remote_addr
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            })
         )
-        db.session.add(log)
-        db.session.commit()
         
         return send_from_directory(export_dir, filename, as_attachment=True)
     except Exception as e:
@@ -1140,22 +1060,15 @@ def update_system_settings():
         
         # 记录系统设置更新日志
         if setting_changes:
-            from ..models.log import SystemLog, LogType
-            log = SystemLog(
-                user_id=current_user.id,
-                log_type=LogType.ADMIN,
+            log_admin(
                 message=f'管理员更新了系统设置',
                 details=json.dumps({
                     'changes': setting_changes,
                     'admin_username': current_user.username,
                     'ip_address': request.remote_addr,
                     'updated_at': datetime.now().isoformat()
-                }),
-                ip_address=request.remote_addr,
-                user_agent=request.user_agent.string if request.user_agent else None
+                })
             )
-            db.session.add(log)
-            db.session.commit()
         
         # 如果有错误，返回部分成功的响应
         if errors:

@@ -131,26 +131,19 @@ def register():
         db.session.commit()
         
         # 记录用户注册日志
-        from ..models.log import SystemLog, LogType
-        import json
+        from ..utils.log_utils import log_user
         
-        log = SystemLog(
-            user_id=user.id,  # 注册的用户ID
-            log_type=LogType.USER,
+        log_user(
             message=f'新用户注册: {user.username}',
-            details=json.dumps({
+            details={
                 'user_id': user.id,
                 'username': user.username,
                 'email': user.email,
                 'role': str(user.role),
-                'ip_address': request.remote_addr,
                 'registration_time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            },
+            user_id=user.id
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': True,
@@ -183,24 +176,16 @@ def login():
     
     if not user or not user.verify_password(data.get('password')):
         # 记录登录失败日志
-        from ..models.log import SystemLog, LogType
-        import json
+        from ..utils.log_utils import log_security
         
-        log = SystemLog(
-            user_id=user.id if user else None,
-            log_type=LogType.SECURITY,
+        log_security(
             message=f'用户登录失败: {username}',
-            details=json.dumps({
+            details={
                 'attempted_username': username,
-                'ip_address': request.remote_addr,
                 'reason': '用户名或密码错误',
                 'time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            }
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': False,
@@ -210,25 +195,18 @@ def login():
     # 检查账户是否激活
     if not user.is_active:
         # 记录登录失败日志 - 账户停用
-        from ..models.log import SystemLog, LogType
-        import json
+        from ..utils.log_utils import log_security
         
-        log = SystemLog(
-            user_id=user.id,
-            log_type=LogType.SECURITY,
+        log_security(
             message=f'停用账户尝试登录: {user.username}',
-            details=json.dumps({
+            details={
                 'user_id': user.id,
                 'username': user.username,
-                'ip_address': request.remote_addr,
                 'reason': '账户已停用',
                 'time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            },
+            user_id=user.id
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': False,
@@ -239,11 +217,11 @@ def login():
     login_user(user)
     
     # 生成JWT令牌
-    token_expiry = datetime.utcnow() + timedelta(days=1)
+    token_expiry = datetime.now() + timedelta(days=1)
     token = jwt.encode(
         {
             'sub': user.id,
-            'iat': datetime.utcnow(),
+            'iat': datetime.now(),
             'exp': token_expiry,
             'role': user.role.value
         },
@@ -255,24 +233,19 @@ def login():
     user.last_login_at = datetime.now()
     
     # 记录登录成功日志
-    from ..models.log import SystemLog, LogType
-    import json
+    from ..utils.log_utils import log_security
     
-    log = SystemLog(
-        user_id=user.id,
-        log_type=LogType.SECURITY,
+    log_security(
         message=f'用户登录成功: {user.username}',
-        details=json.dumps({
+        details={
             'user_id': user.id,
             'username': user.username,
             'role': str(user.role),
-            'ip_address': request.remote_addr,
             'login_time': datetime.now().isoformat()
-        }),
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string if request.user_agent else None
+        },
+        user_id=user.id
     )
-    db.session.add(log)
+    
     db.session.commit()
     
     return jsonify({
@@ -290,24 +263,17 @@ def login():
 @api_login_required  # 使用自定义装饰器替代login_required
 def logout():
     # 记录登出日志
-    from ..models.log import SystemLog, LogType
-    import json
+    from ..utils.log_utils import log_security
     
-    log = SystemLog(
-        user_id=current_user.id,
-        log_type=LogType.SECURITY,
+    log_security(
         message=f'用户登出: {current_user.username}',
-        details=json.dumps({
+        details={
             'user_id': current_user.id,
             'username': current_user.username,
-            'ip_address': request.remote_addr,
             'logout_time': datetime.now().isoformat()
-        }),
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string if request.user_agent else None
+        },
+        user_id=current_user.id
     )
-    db.session.add(log)
-    db.session.commit()
     
     logout_user()
     return jsonify({
@@ -417,25 +383,18 @@ def change_password():
     # 验证当前密码
     if not current_user.verify_password(data.get('old_password')):
         # 记录密码更改失败日志
-        from ..models.log import SystemLog, LogType
-        import json
+        from ..utils.log_utils import log_security
         
-        log = SystemLog(
-            user_id=current_user.id,
-            log_type=LogType.SECURITY,
+        log_security(
             message=f'密码更改失败: {current_user.username}',
-            details=json.dumps({
+            details={
                 'user_id': current_user.id,
                 'username': current_user.username,
-                'ip_address': request.remote_addr,
                 'reason': '当前密码验证失败',
                 'time': datetime.now().isoformat()
-            }),
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
+            },
+            user_id=current_user.id
         )
-        db.session.add(log)
-        db.session.commit()
         
         return jsonify({
             'success': False,
@@ -453,23 +412,18 @@ def change_password():
     current_user.password = data.get('new_password')
     
     # 记录密码更改成功日志
-    from ..models.log import SystemLog, LogType
-    import json
+    from ..utils.log_utils import log_security
     
-    log = SystemLog(
-        user_id=current_user.id,
-        log_type=LogType.SECURITY,
+    log_security(
         message=f'密码更改成功: {current_user.username}',
-        details=json.dumps({
+        details={
             'user_id': current_user.id,
             'username': current_user.username,
-            'ip_address': request.remote_addr,
             'time': datetime.now().isoformat()
-        }),
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string if request.user_agent else None
+        },
+        user_id=current_user.id
     )
-    db.session.add(log)
+    
     db.session.commit()
     
     return jsonify({
