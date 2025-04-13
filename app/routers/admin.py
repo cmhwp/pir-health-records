@@ -801,7 +801,7 @@ def export_system_data():
                 
             export_info['record_count'] = len(export_data)
             export_info['limit'] = limit
-            
+                
         elif export_type == 'system_logs':
             # 导出系统日志
             from ..models.log import SystemLog
@@ -1172,7 +1172,7 @@ def admin_dashboard():
         ).filter(
             SystemLog.created_at >= (now - timedelta(days=1))
         ).count()
-        
+            
         # 系统警报
         alerts = []
             
@@ -1268,7 +1268,7 @@ def get_batch_job(job_id):
         # 获取任务错误
         errors = BatchJobError.query.filter_by(batch_job_id=batch_job.id)\
             .order_by(BatchJobError.timestamp.desc()).all()
-            
+        
         return jsonify({
             'success': True,
             'data': {
@@ -1602,7 +1602,7 @@ def download_batch_results(job_id):
         return jsonify({
             'success': False,
             'message': f'下载批量任务结果失败: {str(e)}'
-        }), 500
+        }), 500 
 
 # 批量任务处理函数（后台运行）
 def process_batch_job(batch_job_id):

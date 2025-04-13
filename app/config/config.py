@@ -24,6 +24,11 @@ class Config:
     
     # 上传文件配置
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+    
+    # 默认管理员账户配置
+    DEFAULT_ADMIN_USERNAME = os.environ.get('DEFAULT_ADMIN_USERNAME') or 'admin'
+    DEFAULT_ADMIN_PASSWORD = os.environ.get('DEFAULT_ADMIN_PASSWORD') or 'admin123456'
+    DEFAULT_ADMIN_EMAIL = os.environ.get('DEFAULT_ADMIN_EMAIL') or 'admin@example.com'
 
 class DevelopmentConfig(Config):
     DEBUG = True

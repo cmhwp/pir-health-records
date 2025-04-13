@@ -58,13 +58,17 @@ class Log:
 
 class LogType(Enum):
     """系统日志类型枚举"""
-    SYSTEM = 'system'              # 系统级别日志
-    SECURITY = 'security'          # 安全相关日志
-    USER = 'user'                  # 用户操作日志
-    RECORD = 'record'              # 健康记录操作日志
-    ADMIN = 'admin'                # 管理员操作日志
-    ERROR = 'error'                # 错误日志
-    PIR = 'pir'                    # PIR相关日志
+    SYSTEM = 'system'              # 系统级别日志（启动、关闭、配置变更等）
+    SECURITY = 'security'          # 安全相关日志（登录、登出、密码修改等）
+    USER = 'user'                  # 用户操作日志（注册、个人资料更新等）
+    RECORD = 'record'              # 健康记录操作日志（创建、修改、删除记录等）
+    ADMIN = 'admin'                # 管理员操作日志（用户管理、系统设置等）
+    ERROR = 'error'                # 错误日志（系统错误、异常情况等）
+    PIR = 'pir'                    # PIR相关日志（隐私信息检索操作）
+    ACCESS = 'access'              # 访问控制日志（查看记录、文件下载等）
+    EXPORT = 'export'              # 数据导出日志（导出、下载等）
+    IMPORT = 'import'              # 数据导入日志（导入、上传等）
+    AUDIT = 'audit'                # 审计日志（敏感操作、合规检查等）
     
     def __str__(self):
         return self.value

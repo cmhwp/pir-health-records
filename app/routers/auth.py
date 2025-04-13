@@ -8,6 +8,9 @@ import os
 from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.utils import secure_filename
+from ..utils.settings_utils import get_setting
+from ..utils.log_utils import log_security, log_user
+from sqlalchemy import or_
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -71,20 +74,61 @@ def register():
             'success': False,
             'message': '邮箱已被注册'
         }), 400
-        
-    # 验证邮箱格式
-    if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', data['email']):
+    
+    # 检查邮箱格式是否有效
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", data['email']):
         return jsonify({
             'success': False,
-            'message': '邮箱格式不正确'
+            'message': '邮箱格式无效'
         }), 400
         
-    # 验证密码长度
-    if len(data['password']) < 6:
+    # 验证密码是否符合密码策略
+    password = data.get('password')
+    password_policy = get_setting('password_policy', {
+        'min_length': 6,
+        'require_uppercase': False,
+        'require_lowercase': False,
+        'require_numbers': False,
+        'require_special': False
+    })
+    
+    # 检查密码长度
+    if len(password) < password_policy.get('min_length', 6):
         return jsonify({
             'success': False,
-            'message': '密码长度至少为6位'
+            'message': f'密码长度不能少于{password_policy.get("min_length", 6)}个字符'
         }), 400
+    
+    # 如果策略要求大写字母
+    if password_policy.get('require_uppercase') and not any(c.isupper() for c in password):
+        return jsonify({
+            'success': False,
+            'message': '密码必须包含至少一个大写字母'
+        }), 400
+    
+    # 如果策略要求小写字母
+    if password_policy.get('require_lowercase') and not any(c.islower() for c in password):
+        return jsonify({
+            'success': False,
+            'message': '密码必须包含至少一个小写字母'
+        }), 400
+    
+    # 如果策略要求数字
+    if password_policy.get('require_numbers') and not any(c.isdigit() for c in password):
+        return jsonify({
+            'success': False,
+            'message': '密码必须包含至少一个数字'
+        }), 400
+    
+    # 如果策略要求特殊字符
+    if password_policy.get('require_special'):
+        import string
+        special_chars = set(string.punctuation)
+        if not any(c in special_chars for c in password):
+            return jsonify({
+                'success': False,
+                'message': '密码必须包含至少一个特殊字符'
+            }), 400
     
     try:
         # 创建新用户
@@ -131,8 +175,6 @@ def register():
         db.session.commit()
         
         # 记录用户注册日志
-        from ..utils.log_utils import log_user
-        
         log_user(
             message=f'新用户注册: {user.username}',
             details={
@@ -164,89 +206,122 @@ def register():
 def login():
     data = request.json
     
+    # 检查数据是否完整
     if not data or not data.get('username') or not data.get('password'):
         return jsonify({
             'success': False,
             'message': '缺少必要字段 (username, password)'
         }), 400
     
-    # 允许使用用户名或邮箱登录
-    username = data.get('username')
-    user = User.query.filter((User.username == username) | (User.email == username)).first()
+    # 查找用户
+    user = User.query.filter(or_(
+        User.username == data['username'],
+        User.email == data['username']
+    )).first()
     
-    if not user or not user.verify_password(data.get('password')):
-        # 记录登录失败日志
-        from ..utils.log_utils import log_security
-        
+    # 检查用户是否存在
+    if not user:
         log_security(
-            message=f'用户登录失败: {username}',
+            message="登录失败：用户不存在",
             details={
-                'attempted_username': username,
-                'reason': '用户名或密码错误',
-                'time': datetime.now().isoformat()
+                'attempted_username': data['username'],
+                'reason': '用户不存在',
+                'login_time': datetime.now().isoformat()
             }
         )
-        
+        # 为了安全，不要暴露用户是否存在
         return jsonify({
             'success': False,
             'message': '用户名或密码错误'
         }), 401
     
-    # 检查账户是否激活
+    # 检查用户是否被禁用
     if not user.is_active:
-        # 记录登录失败日志 - 账户停用
-        from ..utils.log_utils import log_security
-        
         log_security(
-            message=f'停用账户尝试登录: {user.username}',
+            message="登录失败：账户已禁用",
             details={
                 'user_id': user.id,
                 'username': user.username,
-                'reason': '账户已停用',
-                'time': datetime.now().isoformat()
-            },
-            user_id=user.id
+                'reason': '账户已禁用',
+                'login_time': datetime.now().isoformat()
+            }
+        )
+        return jsonify({
+            'success': False,
+            'message': '账户已被禁用，请联系管理员'
+        }), 403
+    
+    # 检查登录尝试次数
+    from flask import session
+    
+    login_attempts_key = f'login_attempts_{user.id}'
+    login_attempts = session.get(login_attempts_key, 0)
+    max_attempts = get_setting('login_attempts', 5)
+    
+    if login_attempts >= max_attempts:
+        log_security(
+            message="登录失败：超过最大尝试次数",
+            details={
+                'user_id': user.id,
+                'username': user.username,
+                'reason': '超过最大尝试次数',
+                'login_time': datetime.now().isoformat(),
+                'attempts': login_attempts,
+                'max_attempts': max_attempts
+            }
+        )
+        return jsonify({
+            'success': False,
+            'message': f'超过最大尝试次数({max_attempts})，请15分钟后再试或重置密码'
+        }), 429
+    
+    # 验证密码
+    if not user.verify_password(data['password']):
+        # 增加登录尝试计数
+        session[login_attempts_key] = login_attempts + 1
+        
+        log_security(
+            message="登录失败：密码错误",
+            details={
+                'user_id': user.id,
+                'username': user.username,
+                'reason': '密码错误',
+                'login_time': datetime.now().isoformat(),
+                'attempts': login_attempts + 1,
+                'max_attempts': max_attempts
+            }
         )
         
         return jsonify({
             'success': False,
-            'message': '账户已被停用，请联系管理员'
-        }), 403
+            'message': '用户名或密码错误',
+            'attempts_left': max_attempts - (login_attempts + 1)
+        }), 401
     
-    # 使用Flask-Login登录用户
-    login_user(user)
-    
-    # 生成JWT令牌
-    token_expiry = datetime.now() + timedelta(days=1)
-    token = jwt.encode(
-        {
-            'sub': user.id,
-            'iat': datetime.now(),
-            'exp': token_expiry,
-            'role': user.role.value
-        },
-        current_app.config['SECRET_KEY'],
-        algorithm='HS256'
-    )
+    # 登录成功，重置登录尝试次数
+    if login_attempts_key in session:
+        session.pop(login_attempts_key)
     
     # 更新最后登录时间
-    user.last_login_at = datetime.now()
+    user.update_last_login()
     
-    # 记录登录成功日志
-    from ..utils.log_utils import log_security
+    # 生成JWT令牌
+    token = generate_jwt_token(user)
     
+    # 记录成功登录
     log_security(
-        message=f'用户登录成功: {user.username}',
+        message="用户登录成功",
         details={
             'user_id': user.id,
             'username': user.username,
             'role': str(user.role),
             'login_time': datetime.now().isoformat()
-        },
-        user_id=user.id
+        }
     )
     
-    db.session.commit()
+    # 设置会话持久化和超时
+    session_timeout = get_setting('session_timeout', 30)  # 默认30分钟
+    session.permanent = True
     
     return jsonify({
         'success': True,
@@ -254,7 +329,7 @@ def login():
         'data': {
             'user': user.to_dict(),
             'token': token,
-            'expires': token_expiry.timestamp()
+            'expires': (datetime.now() + timedelta(seconds=current_app.config['JWT_EXPIRATION_DELTA'])).timestamp()
         }
     })
 
@@ -263,8 +338,6 @@ def login():
 @api_login_required  # 使用自定义装饰器替代login_required
 def logout():
     # 记录登出日志
-    from ..utils.log_utils import log_security
-    
     log_security(
         message=f'用户登出: {current_user.username}',
         details={
@@ -383,8 +456,6 @@ def change_password():
     # 验证当前密码
     if not current_user.verify_password(data.get('old_password')):
         # 记录密码更改失败日志
-        from ..utils.log_utils import log_security
-        
         log_security(
             message=f'密码更改失败: {current_user.username}',
             details={
@@ -412,8 +483,6 @@ def change_password():
     current_user.password = data.get('new_password')
     
     # 记录密码更改成功日志
-    from ..utils.log_utils import log_security
-    
     log_security(
         message=f'密码更改成功: {current_user.username}',
         details={
@@ -493,4 +562,17 @@ def get_avatar(filename):
         return jsonify({
             'success': False,
             'message': '头像不存在'
-        }), 404 
+        }), 404
+
+def generate_jwt_token(user):
+    """生成JWT令牌"""
+    current_time = datetime.now()
+    payload = {
+        'sub': user.id,
+        'username': user.username,
+        'role': user.role.value,
+        'iat': current_time.timestamp(),  # 签发时间
+        'exp': (current_time + timedelta(seconds=current_app.config['JWT_EXPIRATION_DELTA'])).timestamp()  # 过期时间
+    }
+    token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
+    return token 

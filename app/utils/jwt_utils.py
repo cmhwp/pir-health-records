@@ -3,12 +3,19 @@ from flask_login import login_user
 from functools import wraps
 import jwt
 from ..models import User
-from datetime import datetime
+from datetime import datetime, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
 
 def init_jwt_loader(app):
     """
     初始化JWT认证拦截器
     """
+    app.config['JWT_LEEWAY'] = 60  # 允许60秒的时间偏差
+    app.config['JWT_ALGORITHM'] = 'HS256'
+    app.config['JWT_AUTH_HEADER_PREFIX'] = 'Bearer'
+
     @app.before_request
     def load_user_from_jwt():
         """在每个请求前尝试从JWT令牌加载用户"""
@@ -23,7 +30,8 @@ def init_jwt_loader(app):
             payload = jwt.decode(
                 token,
                 current_app.config['SECRET_KEY'],
-                algorithms=['HS256']
+                algorithms=['HS256'],
+                leeway=current_app.config.get('JWT_LEEWAY', 60)  # 允许时间偏差
             )
             
             # 检查令牌是否过期
@@ -62,7 +70,8 @@ def jwt_required(fn):
             payload = jwt.decode(
                 token,
                 current_app.config['SECRET_KEY'],
-                algorithms=['HS256']
+                algorithms=['HS256'],
+                leeway=current_app.config.get('JWT_LEEWAY', 60)  # 允许时间偏差
             )
             
             # 检查令牌是否过期
