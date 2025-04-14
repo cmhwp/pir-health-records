@@ -19,6 +19,8 @@ from .system_settings import SystemSetting
 from .log import SystemLog, LogType
 from .cache_item import CacheItem
 from .batch_jobs import BatchJob, BatchJobLog, BatchJobError
+from .prescription import Prescription, PrescriptionStatus
+from .appointment import Appointment, AppointmentStatus
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id)) 

@@ -265,4 +265,4 @@ def hash_sensitive_data(data):
         data = data.encode('utf-8')
     
     # 使用SHA-256生成哈希
-    return hashlib.sha256(data).hexdigest() 
+    return hashlib.sha256(data).hexdigest()
