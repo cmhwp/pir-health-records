@@ -113,7 +113,7 @@ def store_encrypted_health_record():
         
         # 添加医生信息到记录
         record_data['doctor_id'] = current_user.id
-        record_data['doctor_name'] = current_user.name
+        record_data['doctor_name'] = current_user.full_name
         record_data['hospital'] = current_user.doctor_info.hospital if hasattr(current_user, 'doctor_info') else None
         record_data['department'] = current_user.doctor_info.department if hasattr(current_user, 'doctor_info') else None
         record_data['is_encrypted'] = bool(encryption_key)
@@ -140,7 +140,7 @@ def store_encrypted_health_record():
         
         # 记录创建健康记录日志
         log_record(
-            message=f'医生{current_user.name}为患者{patient.name}创建了健康记录: {record_data.get("title")}',
+            message=f'医生{current_user.full_name}为患者{patient.full_name}创建了健康记录: {record_data.get("title")}',
             details={
                 'record_id': str(mongo_id),
                 'sql_id': record.id,
@@ -237,7 +237,7 @@ def get_doctor_records():
             # 获取患者名称
             patient = User.query.get(record.patient_id)
             if patient:
-                record_dict['patient_name'] = patient.name
+                record_dict['patient_name'] = patient.full_name
             result.append(record_dict)
         
         return jsonify({
@@ -372,7 +372,7 @@ def update_doctor_record(record_id):
         
         # 记录更新操作
         log_record(
-            message=f'医生{current_user.name}更新了健康记录: {record.title}',
+            message=f'医生{current_user.full_name}更新了健康记录: {record.title}',
             details={
                 'record_id': record.mongo_id,
                 'sql_id': record.id,
@@ -465,7 +465,7 @@ def pir_query_patient_records():
         
         # 记录查询操作（不记录具体查询参数，只记录查询行为）
         log_record(
-            message=f'医生{current_user.name}使用PIR查询了患者{patient.name}的健康记录',
+            message=f'医生{current_user.full_name}使用PIR查询了患者{patient.full_name}的健康记录',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': patient_id,
@@ -541,7 +541,7 @@ def decrypt_record_api(record_id):
             
             # 记录解密操作
             log_record(
-                message=f'医生{current_user.name}解密了健康记录: {record.title}',
+                message=f'医生{current_user.full_name}解密了健康记录: {record.title}',
                 details={
                     'record_id': record.mongo_id,
                     'sql_id': record.id,
@@ -649,7 +649,7 @@ def verify_record_compliance(record_id):
                 
                 # 记录验证操作
                 log_record(
-                    message=f'医生{current_user.name}验证了健康记录合规性: {record.title}',
+                    message=f'医生{current_user.full_name}验证了健康记录合规性: {record.title}',
                     details={
                         'record_id': record.mongo_id,
                         'sql_id': record.id,
@@ -717,7 +717,7 @@ def verify_record_compliance(record_id):
             
             # 记录验证操作
             log_record(
-                message=f'医生{current_user.name}验证了健康记录合规性: {record.title}',
+                message=f'医生{current_user.full_name}验证了健康记录合规性: {record.title}',
                 details={
                     'record_id': record.mongo_id,
                     'sql_id': record.id,
@@ -782,7 +782,7 @@ def get_record_audit_logs(record_id):
                 'type': 'query',
                 'action': history.query_type,
                 'user_id': history.user_id,
-                'user_name': user.name if user else None,
+                'user_name': user.full_name if user else None,
                 'user_role': user.role.value if user else None,
                 'timestamp': history.query_time.isoformat(),
                 'is_anonymous': history.is_anonymous
@@ -795,7 +795,7 @@ def get_record_audit_logs(record_id):
                 'type': 'system_log',
                 'action': log.message,
                 'user_id': log.user_id,
-                'user_name': log.user.name if log.user else None,
+                'user_name': log.user.full_name if log.user else None,
                 'user_role': log.user.role.value if log.user else None,
                 'timestamp': log.created_at.isoformat(),
                 'details': log.details
@@ -854,7 +854,7 @@ def get_doctor_dashboard():
         recent_records_data = []
         for record in recent_records:
             patient = User.query.get(record.patient_id)
-            patient_name = patient.name if patient else "未知患者"
+            patient_name = patient.full_name if patient else "未知患者"
             
             record_dict = {
                 'id': record.id,
@@ -883,7 +883,7 @@ def get_doctor_dashboard():
             'data': {
                 'doctor': {
                     'id': current_user.id,
-                    'name': current_user.name,
+                    'name': current_user.full_name,
                     'info': doctor_info
                 },
                 'statistics': {
@@ -927,17 +927,17 @@ def get_doctor_patients():
         )
         
         if search_term:
-            query = query.filter(User.name.like(f'%{search_term}%'))
+            query = query.filter(User.full_name.like(f'%{search_term}%'))
         
         # 排序
-        sort_by = request.args.get('sort_by', 'name')
+        sort_by = request.args.get('sort_by', 'full_name')
         sort_order = request.args.get('sort_order', 'asc')
         
-        if sort_by == 'name':
+        if sort_by == 'full_name':
             if sort_order == 'desc':
-                query = query.order_by(User.name.desc())
+                query = query.order_by(User.full_name.desc())
             else:
-                query = query.order_by(User.name.asc())
+                query = query.order_by(User.full_name.asc())
         else:
             if sort_order == 'desc':
                 query = query.order_by(User.created_at.desc())
@@ -974,7 +974,7 @@ def get_doctor_patients():
             
             result.append({
                 'id': patient.id,
-                'name': patient.name,
+                'name': patient.full_name,
                 'email': patient.email,
                 'info': patient_info,
                 'record_count': record_count,
@@ -1073,7 +1073,7 @@ def get_patient_details(patient_id):
         
         # 记录访问操作
         log_record(
-            message=f'医生{current_user.name}查看了患者{patient.name}的详细信息',
+            message=f'医生{current_user.full_name}查看了患者{patient.full_name}的详细信息',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': patient_id,
@@ -1086,7 +1086,7 @@ def get_patient_details(patient_id):
             'data': {
                 'patient': {
                     'id': patient.id,
-                    'name': patient.name,
+                    'name': patient.full_name,
                     'email': patient.email,
                     'phone': patient.phone,
                     'created_at': patient.created_at.isoformat() if patient.created_at else None,
@@ -1189,7 +1189,7 @@ def get_doctor_appointments():
             result.append({
                 'id': appointment.id,
                 'patient_id': appointment.patient_id,
-                'patient_name': patient.name if patient else "未知患者",
+                'patient_name': patient.full_name if patient else "未知患者",
                 'appointment_time': appointment.appointment_time.isoformat() if appointment.appointment_time else None,
                 'duration': appointment.duration,
                 'purpose': appointment.purpose,
@@ -1301,7 +1301,7 @@ def create_appointment():
         
         # 记录操作
         log_record(
-            message=f'医生{current_user.name}为患者{patient.name}创建了预约',
+            message=f'医生{current_user.full_name}为患者{patient.full_name}创建了预约',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': data['patient_id'],
@@ -1316,12 +1316,12 @@ def create_appointment():
         notification = Notification(
             user_id=data['patient_id'],
             type=NotificationType.APPOINTMENT,
-            title=f"医生{current_user.name}为您创建了预约",
+            title=f"医生{current_user.full_name}为您创建了预约",
             content=f"预约时间: {appointment_time.strftime('%Y-%m-%d %H:%M')}, 目的: {data['purpose']}",
             data={
                 'appointment_id': appointment.id,
                 'doctor_id': current_user.id,
-                'doctor_name': current_user.name,
+                'doctor_name': current_user.full_name,
                 'appointment_time': appointment_time.isoformat()
             },
             is_read=False
@@ -1410,7 +1410,7 @@ def update_appointment(appointment_id):
         
         # 记录操作
         log_record(
-            message=f'医生{current_user.name}更新了患者{patient.name if patient else "未知"}的预约',
+            message=f'医生{current_user.full_name}更新了患者{patient.full_name if patient else "未知"}的预约',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': appointment.patient_id,
@@ -1432,12 +1432,12 @@ def update_appointment(appointment_id):
             notification = Notification(
                 user_id=appointment.patient_id,
                 type=NotificationType.APPOINTMENT,
-                title=f"医生{current_user.name}更新了您的预约",
+                title=f"医生{current_user.full_name}更新了您的预约",
                 content=content,
                 data={
                     'appointment_id': appointment.id,
                     'doctor_id': current_user.id,
-                    'doctor_name': current_user.name,
+                    'doctor_name': current_user.full_name,
                     'update_fields': list(data.keys())
                 },
                 is_read=False
@@ -1545,7 +1545,7 @@ def get_prescriptions():
             result.append({
                 'id': prescription.id,
                 'patient_id': prescription.patient_id,
-                'patient_name': patient.name if patient else "未知患者",
+                'patient_name': patient.full_name if patient else "未知患者",
                 'diagnosis': prescription.diagnosis,
                 'instructions': prescription.instructions,
                 'status': prescription.status.value,
@@ -1650,7 +1650,7 @@ def create_prescription():
         
         # 记录操作
         log_record(
-            message=f'医生{current_user.name}为患者{patient.name}创建了处方',
+            message=f'医生{current_user.full_name}为患者{patient.full_name}创建了处方',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': data['patient_id'],
@@ -1666,12 +1666,12 @@ def create_prescription():
         notification = Notification(
             user_id=data['patient_id'],
             type=NotificationType.PRESCRIPTION,
-            title=f"医生{current_user.name}为您开具了处方",
+            title=f"医生{current_user.full_name}为您开具了处方",
             content=f"诊断: {data['diagnosis']}, 包含{len(items)}种药品",
             data={
                 'prescription_id': prescription.id,
                 'doctor_id': current_user.id,
-                'doctor_name': current_user.name
+                'doctor_name': current_user.full_name
             },
             is_read=False
         )
@@ -1757,7 +1757,7 @@ def update_prescription(prescription_id):
         
         # 记录操作
         log_record(
-            message=f'医生{current_user.name}更新了患者{patient.name if patient else "未知"}的处方',
+            message=f'医生{current_user.full_name}更新了患者{patient.full_name if patient else "未知"}的处方',
             details={
                 'doctor_id': current_user.id,
                 'patient_id': prescription.patient_id,
@@ -1773,12 +1773,12 @@ def update_prescription(prescription_id):
             notification = Notification(
                 user_id=prescription.patient_id,
                 type=NotificationType.PRESCRIPTION,
-                title=f"医生{current_user.name}已撤销您的处方",
+                title=f"医生{current_user.full_name}已撤销您的处方",
                 content=f"处方ID: {prescription.id}, 诊断: {prescription.diagnosis}",
                 data={
                     'prescription_id': prescription.id,
                     'doctor_id': current_user.id,
-                    'doctor_name': current_user.name,
+                    'doctor_name': current_user.full_name,
                     'status': 'REVOKED'
                 },
                 is_read=False
@@ -1877,15 +1877,18 @@ def get_patient_statistics():
                 
                 current_date = next_month
         
+        # 导入PatientInfo模型
+        from ..models.role_models import PatientInfo
+        
         # 按性别统计患者
         gender_stats = db.session.query(
-            User.patient_info.gender,
+            PatientInfo.gender,
             func.count(distinct(HealthRecord.patient_id)).label('count')
         ).join(
-            User, User.id == HealthRecord.patient_id
+            PatientInfo, PatientInfo.user_id == HealthRecord.patient_id
         ).filter(
             *query_filters
-        ).group_by(User.patient_info.gender).all()
+        ).group_by(PatientInfo.gender).all()
         
         gender_data = {gender or '未知': count for gender, count in gender_stats}
         
@@ -1905,26 +1908,24 @@ def get_patient_statistics():
             max_birth_year = current_year - min_age
             
             count = db.session.query(func.count(distinct(HealthRecord.patient_id))).join(
-                User, User.id == HealthRecord.patient_id
-            ).join(
-                User.patient_info
+                PatientInfo, PatientInfo.user_id == HealthRecord.patient_id
             ).filter(
                 *query_filters,
-                User.patient_info.date_of_birth.isnot(None),
-                func.extract('year', User.patient_info.date_of_birth) >= min_birth_year,
-                func.extract('year', User.patient_info.date_of_birth) <= max_birth_year
+                PatientInfo.date_of_birth.isnot(None),
+                func.extract('year', PatientInfo.date_of_birth) >= min_birth_year,
+                func.extract('year', PatientInfo.date_of_birth) <= max_birth_year
             ).scalar() or 0
             
             age_stats[range_name] = count
         
         # 未知年龄的患者数量
-        unknown_age_count = db.session.query(func.count(distinct(HealthRecord.patient_id))).join(
-            User, User.id == HealthRecord.patient_id
-        ).outerjoin(
-            User.patient_info
-        ).filter(
+        unknown_age_count = db.session.query(func.count(distinct(HealthRecord.patient_id))).filter(
             *query_filters,
-            User.patient_info.date_of_birth.is_(None)
+            ~HealthRecord.patient_id.in_(
+                db.session.query(distinct(PatientInfo.user_id)).filter(
+                    PatientInfo.date_of_birth.isnot(None)
+                )
+            )
         ).scalar() or 0
         
         age_stats['未知'] = unknown_age_count
@@ -2083,4 +2084,70 @@ def get_disease_statistics():
         return jsonify({
             'success': False,
             'message': f'获取疾病统计失败: {str(e)}'
-        }), 500 
+        }), 500
+# 删除健康记录
+@doctor_bp.route('/records/<record_id>', methods=['DELETE'])
+@login_required
+@role_required(Role.DOCTOR)
+def delete_health_record(record_id):
+    try:
+        # 获取记录
+        record = HealthRecord.query.get(record_id)
+        if not record:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在'
+            }), 404
+        
+        # 验证医生是否有权限删除此记录
+        if record.doctor_id != current_user.id:
+            return jsonify({
+                'success': False,
+                'message': '没有权限删除此记录'
+            }), 403
+        
+        # 获取患者信息用于日志
+        patient = User.query.get(record.patient_id)
+        patient_name = patient.full_name if patient else "未知患者"
+        
+        # 获取MongoDB记录ID
+        mongo_id = record.mongo_id
+        
+        # 删除关联的文件记录
+        RecordFile.query.filter_by(record_id=record.id).delete()
+        
+        # 删除MySQL记录
+        db.session.delete(record)
+        
+        # 删除MongoDB中的详细记录
+        if mongo_id:
+            mongo_db = get_mongo_db()
+            mongo_db.health_records.delete_one({'_id': ObjectId(mongo_id)})
+        
+        # 记录删除操作
+        log_record(
+            message=f'医生{current_user.full_name}删除了患者{patient_name}的健康记录: {record.title}',
+            details={
+                'record_id': mongo_id,
+                'sql_id': record.id,
+                'doctor_id': current_user.id,
+                'patient_id': record.patient_id,
+                'record_type': record.record_type.value if record.record_type else None,
+                'deletion_time': datetime.now().isoformat()
+            }
+        )
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '记录删除成功'
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"删除健康记录失败: {str(e)}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': f'删除健康记录失败: {str(e)}'
+        }), 500
