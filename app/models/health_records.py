@@ -31,6 +31,7 @@ class HealthRecord(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     patient_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    doctor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # 记录创建医生
     record_type = db.Column(db.Enum(RecordType), nullable=False)  # 记录类型
     title = db.Column(db.String(100), nullable=False)  # 记录标题
     record_date = db.Column(db.DateTime, nullable=False)  # 记录日期
@@ -53,6 +54,7 @@ class HealthRecord(db.Model):
         result = {
             'id': self.id,
             'patient_id': self.patient_id,
+            'doctor_id': self.doctor_id,
             'record_type': self.record_type.value,
             'title': self.title,
             'record_date': self.record_date.isoformat() if self.record_date else None,
@@ -206,6 +208,7 @@ class RecordFile(db.Model):
     file_type = db.Column(db.String(50), nullable=False)  # 文件类型
     file_size = db.Column(db.Integer, nullable=False)  # 文件大小（字节）
     description = db.Column(db.String(255), nullable=True)  # 文件描述
+    is_encrypted = db.Column(db.Boolean, default=False)  # 文件是否加密
     uploaded_at = db.Column(db.DateTime, default=datetime.now)
     
     def to_dict(self):
@@ -213,9 +216,11 @@ class RecordFile(db.Model):
             'id': self.id,
             'record_id': self.record_id,
             'file_name': self.file_name,
+            'file_path': self.file_path,
             'file_type': self.file_type,
             'file_size': self.file_size,
             'description': self.description,
+            'is_encrypted': self.is_encrypted,
             'uploaded_at': self.uploaded_at.isoformat() if self.uploaded_at else None
         }
 

@@ -42,12 +42,14 @@ def create_app(config_name="development"):
     from .routers.admin import admin_bp
     from .routers.health_records import health_bp
     from .routers.notifications import notifications_bp
+    from .routers.doctor import doctor_bp
     
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(notifications_bp)
+    app.register_blueprint(doctor_bp)
     
     # 确保上传目录存在
     import os
@@ -55,6 +57,7 @@ def create_app(config_name="development"):
     os.makedirs(os.path.join(app.root_path, 'uploads', 'records'), exist_ok=True)
     os.makedirs(os.path.join(app.root_path, 'uploads', 'exports'), exist_ok=True)
     os.makedirs(os.path.join(app.root_path, 'uploads', 'imports'), exist_ok=True)
+    os.makedirs(os.path.join(app.root_path, 'uploads', 'encrypted_records'), exist_ok=True)
     
     return app
 
@@ -177,6 +180,27 @@ def create_default_settings():
             'value_type': 'string',
             'description': '默认记录可见性',
             'is_public': True  # 公开默认隐私政策
+        },
+        {
+            'key': 'encryption_enabled',
+            'value': 'true',
+            'value_type': 'bool',
+            'description': '是否启用记录加密功能',
+            'is_public': True  # 公开加密特性
+        },
+        {
+            'key': 'encryption_algorithm',
+            'value': 'AES-GCM-256',
+            'value_type': 'string',
+            'description': '默认加密算法',
+            'is_public': True
+        },
+        {
+            'key': 'require_integrity_verification',
+            'value': 'true',
+            'value_type': 'bool',
+            'description': '是否要求验证记录完整性',
+            'is_public': True
         }
     ]
     
