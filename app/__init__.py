@@ -10,6 +10,9 @@ def create_app(config_name="development"):
     app = Flask(__name__)
     app.config.from_object(config[config_name])
     
+    # 设置系统版本
+    app.config['SYSTEM_VERSION'] = '1.0.0'
+    
     # 初始化扩展
     db.init_app(app)
     login_manager.init_app(app)
@@ -119,25 +122,29 @@ def create_default_settings():
             'key': 'password_policy',
             'value': '{"min_length": 6, "require_uppercase": false, "require_lowercase": false, "require_numbers": false, "require_special": false}',
             'value_type': 'json',
-            'description': '密码策略设置'
+            'description': '密码策略设置',
+            'is_public': True  # 密码策略是公开的，前端需要
         },
         {
             'key': 'login_attempts',
             'value': '5',
             'value_type': 'int',
-            'description': '最大登录尝试次数'
+            'description': '最大登录尝试次数',
+            'is_public': False
         },
         {
             'key': 'session_timeout',
             'value': '30',
             'value_type': 'int',
-            'description': '会话超时时间(分钟)'
+            'description': '会话超时时间(分钟)',
+            'is_public': False
         },
         {
             'key': 'require_email_confirmation',
             'value': 'true',
             'value_type': 'bool',
-            'description': '是否需要邮箱确认'
+            'description': '是否需要邮箱确认',
+            'is_public': True  # 注册页面需要展示
         }
     ]
     
@@ -147,25 +154,29 @@ def create_default_settings():
             'key': 'pir_enabled',
             'value': 'true',
             'value_type': 'bool',
-            'description': '是否启用PIR隐私保护'
+            'description': '是否启用PIR隐私保护',
+            'is_public': True  # 公开隐私保护特性
         },
         {
             'key': 'pir_batch_size',
             'value': '10',
             'value_type': 'int',
-            'description': 'PIR批处理大小'
+            'description': 'PIR批处理大小',
+            'is_public': False
         },
         {
             'key': 'pir_noise_query_count',
             'value': '3',
             'value_type': 'int',
-            'description': 'PIR噪声查询数量'
+            'description': 'PIR噪声查询数量',
+            'is_public': False
         },
         {
             'key': 'default_record_visibility',
             'value': 'private',
             'value_type': 'string',
-            'description': '默认记录可见性'
+            'description': '默认记录可见性',
+            'is_public': True  # 公开默认隐私政策
         }
     ]
     
@@ -175,19 +186,36 @@ def create_default_settings():
             'key': 'debug_mode',
             'value': 'false',
             'value_type': 'bool',
-            'description': '是否启用调试模式'
+            'description': '是否启用调试模式',
+            'is_public': False
         },
         {
             'key': 'upload_limit',
             'value': str(16 * 1024 * 1024),  # 16MB
             'value_type': 'int',
-            'description': '上传文件大小限制(字节)'
+            'description': '上传文件大小限制(字节)',
+            'is_public': True  # 公开上传限制
         },
         {
             'key': 'max_export_size',
             'value': '1000',
             'value_type': 'int',
-            'description': '最大导出记录数'
+            'description': '最大导出记录数',
+            'is_public': False
+        },
+        {
+            'key': 'allow_researcher_registration',
+            'value': 'false',
+            'value_type': 'bool',
+            'description': '是否允许研究人员直接注册',
+            'is_public': True  # 公开注册选项
+        },
+        {
+            'key': 'registration_enabled',
+            'value': 'true',
+            'value_type': 'bool',
+            'description': '是否开放注册',
+            'is_public': True  # 公开注册状态
         }
     ]
     
@@ -197,19 +225,22 @@ def create_default_settings():
             'key': 'email_notifications',
             'value': 'true',
             'value_type': 'bool',
-            'description': '是否启用邮件通知'
+            'description': '是否启用邮件通知',
+            'is_public': False
         },
         {
             'key': 'system_notifications',
             'value': 'true',
             'value_type': 'bool',
-            'description': '是否启用系统通知'
+            'description': '是否启用系统通知',
+            'is_public': False
         },
         {
             'key': 'notification_types',
             'value': '["record_access", "record_share", "system_update"]',
             'value_type': 'json',
-            'description': '启用的通知类型'
+            'description': '启用的通知类型',
+            'is_public': False
         }
     ]
     
@@ -223,7 +254,7 @@ def create_default_settings():
             value=setting_data['value'],
             value_type=setting_data['value_type'],
             description=setting_data['description'],
-            is_public=setting_data.get('is_public', False)
+            is_public=setting_data['is_public']
         )
         db.session.add(setting)
     

@@ -11,6 +11,7 @@ from werkzeug.utils import secure_filename
 from ..utils.settings_utils import get_setting
 from ..utils.log_utils import log_security, log_user
 from sqlalchemy import or_
+from ..models.system_settings import SystemSetting
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -563,6 +564,87 @@ def get_avatar(filename):
             'success': False,
             'message': '头像不存在'
         }), 404
+
+# 获取公开系统设置
+@auth_bp.route('/public-settings', methods=['GET'])
+def get_public_settings():
+    """
+    获取公开的系统设置信息，供未登录用户或注册页面使用
+    返回密码策略、注册规则等公开设置
+    """
+    try:
+        # 获取公开设置
+        public_settings = {}
+        
+        # 密码策略设置
+        password_policy = get_setting('password_policy', {
+            'min_length': 6,
+            'require_uppercase': False,
+            'require_lowercase': False,
+            'require_numbers': False,
+            'require_special': False
+        })
+        public_settings['password_policy'] = password_policy
+        
+        # 是否需要邮箱验证
+        require_email_confirmation = get_setting('require_email_confirmation', True)
+        public_settings['require_email_confirmation'] = require_email_confirmation
+        
+        # 是否允许注册
+        registration_enabled = get_setting('registration_enabled', True)
+        public_settings['registration_enabled'] = registration_enabled
+        
+        # 获取其他标记为公开的设置
+        try:
+            public_db_settings = SystemSetting.query.filter_by(is_public=True).all()
+            for setting in public_db_settings:
+                try:
+                    if setting.value_type == 'json':
+                        import json
+                        public_settings[setting.key] = json.loads(setting.value)
+                    elif setting.value_type == 'int':
+                        public_settings[setting.key] = int(setting.value)
+                    elif setting.value_type == 'float':
+                        public_settings[setting.key] = float(setting.value)
+                    elif setting.value_type == 'bool':
+                        public_settings[setting.key] = setting.value.lower() in ('true', 'yes', '1')
+                    else:
+                        public_settings[setting.key] = setting.value
+                except:
+                    public_settings[setting.key] = setting.value
+        except Exception as e:
+            current_app.logger.warning(f"获取公开数据库设置失败: {str(e)}")
+        
+        # 添加系统版本等信息
+        public_settings['system_version'] = current_app.config.get('SYSTEM_VERSION', '1.0.0')
+        
+        # 获取可用角色列表
+        available_roles = [
+            {'value': 'patient', 'label': '患者', 'description': '需要使用医疗服务的用户'},
+            {'value': 'doctor', 'label': '医生', 'description': '提供医疗服务的专业医护人员'}
+        ]
+        
+        # 研究人员角色通常需要特殊审批，根据设置决定是否允许直接注册
+        if get_setting('allow_researcher_registration', False):
+            available_roles.append({
+                'value': 'researcher', 
+                'label': '研究人员', 
+                'description': '进行医学研究的专业人员'
+            })
+            
+        public_settings['available_roles'] = available_roles
+        
+        return jsonify({
+            'success': True,
+            'data': public_settings
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取公开系统设置失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': '获取公开系统设置失败'
+        }), 500
 
 def generate_jwt_token(user):
     """生成JWT令牌"""

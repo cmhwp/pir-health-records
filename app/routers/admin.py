@@ -956,10 +956,15 @@ def get_system_settings():
             'system': {
                 'debug_mode': settings.get('debug_mode', False),
                 'upload_limit': settings.get('upload_limit', 16 * 1024 * 1024),
-                'max_export_size': settings.get('max_export_size', 1000)
+                'max_export_size': settings.get('max_export_size', 1000),
+                'system_version': current_app.config.get('SYSTEM_VERSION', '1.0.0')
+            },
+            'registration': {
+                'registration_enabled': settings.get('registration_enabled', True),
+                'require_email_confirmation': settings.get('require_email_confirmation', True),
+                'allow_researcher_registration': settings.get('allow_researcher_registration', False)
             },
             'notifications': {
-                'email_notifications': settings.get('email_notifications', True),
                 'system_notifications': settings.get('system_notifications', True),
                 'notification_types': settings.get('notification_types', [
                     'record_access', 'record_share', 'system_update'
@@ -967,11 +972,17 @@ def get_system_settings():
             }
         }
         
+        # 添加是否为公开设置的标记
+        settings_visibility = {}
+        for setting in stored_settings:
+            settings_visibility[setting.key] = setting.is_public
+        
         return jsonify({
             'success': True,
             'data': {
                 'settings': grouped_settings,
-                'raw_settings': settings
+                'raw_settings': settings,
+                'settings_visibility': settings_visibility
             }
         })
     except Exception as e:
@@ -1001,6 +1012,21 @@ def update_system_settings():
         
         # 记录设置变更内容以便日志记录
         setting_changes = {}
+        
+        # 检查是否有可见性设置的更改
+        visibility_changes = False
+        if 'visibility' in data:
+            visibility_data = data.pop('visibility')
+            if isinstance(visibility_data, dict):
+                for key, is_public in visibility_data.items():
+                    setting = SystemSetting.query.filter_by(key=key).first()
+                    if setting and setting.is_public != is_public:
+                        setting.is_public = is_public
+                        visibility_changes = True
+                        setting_changes[f'{key}_visibility'] = {
+                            'old': not is_public,
+                            'new': is_public
+                        }
         
         # 遍历提交的设置并更新
         for key, value in data.items():
@@ -1044,7 +1070,8 @@ def update_system_settings():
                         value=value,
                         value_type=value_type,
                         created_by=current_user.id,
-                        updated_by=current_user.id
+                        updated_by=current_user.id,
+                        is_public=False  # 默认新设置为非公开
                     )
                     db.session.add(setting)
                     
@@ -1065,12 +1092,17 @@ def update_system_settings():
         
         db.session.commit()
         
+        # 刷新应用配置以应用更改
+        from ..utils.settings_utils import apply_settings
+        apply_settings()
+        
         # 记录系统设置更新日志
         if setting_changes:
             log_admin(
                 message=f'管理员更新了系统设置',
                 details=json.dumps({
                     'changes': setting_changes,
+                    'visibility_changes': visibility_changes,
                     'admin_username': current_user.username,
                     'ip_address': request.remote_addr,
                     'updated_at': datetime.now().isoformat()
@@ -1602,7 +1634,7 @@ def download_batch_results(job_id):
         return jsonify({
             'success': False,
             'message': f'下载批量任务结果失败: {str(e)}'
-        }), 500 
+        }), 500
 
 # 批量任务处理函数（后台运行）
 def process_batch_job(batch_job_id):
