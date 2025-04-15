@@ -600,27 +600,89 @@ def delete_health_record(record_id):
 @role_required(Role.PATIENT)
 def get_health_statistics():
     try:
-        # 使用MongoDB聚合查询获取统计数据
+        # 时间范围筛选
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        # 基本查询条件
+        query_filters = {'patient_id': current_user.id}
+        
+        # 添加时间过滤条件
+        if start_date:
+            try:
+                start_date = datetime.strptime(start_date, '%Y-%m-%d')
+                if 'created_at' not in query_filters:
+                    query_filters['created_at'] = {}
+                query_filters['created_at']['$gte'] = start_date
+            except ValueError:
+                pass
+                
+        if end_date:
+            try:
+                end_date = datetime.strptime(end_date, '%Y-%m-%d')
+                end_date = end_date.replace(hour=23, minute=59, second=59)
+                if 'created_at' not in query_filters:
+                    query_filters['created_at'] = {}
+                query_filters['created_at']['$lte'] = end_date
+            except ValueError:
+                pass
+        
+        # 获取MongoDB中所有记录
+        mongo_records = list(mongo.db.health_records.find(query_filters))
         
         # 获取记录类型统计
-        record_types = list(mongo.db.health_records.aggregate([
-            {'$match': {'patient_id': current_user.id}},
-            {'$group': {'_id': '$record_type', 'count': {'$sum': 1}}},
-            {'$sort': {'count': -1}}
-        ]))
+        record_types_stats = {}
+        for record in mongo_records:
+            record_type = record.get('record_type', '未知')
+            record_types_stats[record_type] = record_types_stats.get(record_type, 0) + 1
         
-        # 获取月度记录统计
-        current_year = datetime.now().year
-        monthly_stats = list(mongo.db.health_records.aggregate([
-            {'$match': {'patient_id': current_user.id}},
-            {'$project': {
-                'month': {'$month': '$record_date'},
-                'year': {'$year': '$record_date'}
-            }},
-            {'$match': {'year': current_year}},
-            {'$group': {'_id': '$month', 'count': {'$sum': 1}}},
-            {'$sort': {'_id': 1}}
-        ]))
+        # 按时间统计记录数量
+        time_stats = []
+        
+        # 如果时间范围不超过3个月，按天统计
+        if start_date and end_date and (end_date - start_date).days <= 90:
+            current_date = start_date
+            while current_date <= end_date:
+                next_date = current_date + timedelta(days=1)
+                count = sum(1 for record in mongo_records if 
+                            record.get('created_at') and 
+                            current_date <= record.get('created_at') < next_date)
+                
+                time_stats.append({
+                    'date': current_date.strftime('%Y-%m-%d'),
+                    'count': count
+                })
+                current_date = next_date
+        else:  # 否则按月统计
+            # 如果没有开始日期，使用最早记录的日期或默认过去一年
+            if not start_date:
+                if mongo_records:
+                    dates = [record.get('created_at') for record in mongo_records if record.get('created_at')]
+                    if dates:
+                        start_date = min(dates).replace(day=1)
+                    else:
+                        start_date = datetime.now().replace(day=1) - timedelta(days=365)
+                else:
+                    start_date = datetime.now().replace(day=1) - timedelta(days=365)
+                    
+            if not end_date:
+                end_date = datetime.now()
+                
+            current_month = start_date.replace(day=1)
+            end_month = end_date.replace(day=1)
+            
+            while current_month <= end_month:
+                next_month = (current_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+                count = sum(1 for record in mongo_records if 
+                            record.get('created_at') and 
+                            current_month <= record.get('created_at') < next_month)
+                
+                time_stats.append({
+                    'year': current_month.year,
+                    'month': current_month.month,
+                    'count': count
+                })
+                current_month = next_month
         
         # 获取生命体征数据
         vital_signs_records = list(mongo.db.health_records.find({
@@ -658,23 +720,78 @@ def get_health_statistics():
             {'$sort': {'count': -1}}
         ]))
         
+        # 获取医生互动统计
+        from ..models import User, HealthRecord
+        from sqlalchemy import func
+        
+        doctor_interaction = db.session.query(
+            HealthRecord.doctor_id,
+            func.count(HealthRecord.id).label('count')
+        ).filter(
+            HealthRecord.patient_id == current_user.id
+        ).group_by(HealthRecord.doctor_id).all()
+        
+        doctor_stats = []
+        for doctor_id, count in doctor_interaction:
+            doctor = User.query.get(doctor_id)
+            if doctor:
+                doctor_data = {
+                    'id': doctor.id,
+                    'name': doctor.full_name,
+                    'count': count
+                }
+                
+                if doctor.doctor_info:
+                    doctor_data.update({
+                        'hospital': doctor.doctor_info.hospital,
+                        'department': doctor.doctor_info.department,
+                        'specialty': doctor.doctor_info.specialty
+                    })
+                    
+                doctor_stats.append(doctor_data)
+        
+        # 获取预约和处方统计
+        from ..models.appointment import Appointment, AppointmentStatus
+        from ..models.prescription import Prescription, PrescriptionStatus
+        
+        # 处方统计
+        prescription_stats = {}
+        for status in PrescriptionStatus:
+            prescription_stats[status.value] = Prescription.query.filter_by(
+                patient_id=current_user.id,
+                status=status
+            ).count()
+        
+        # 预约统计
+        appointment_stats = {}
+        for status in AppointmentStatus:
+            appointment_stats[status.value] = Appointment.query.filter_by(
+                patient_id=current_user.id,
+                status=status
+            ).count()
+        
         # 记录查询历史
         is_anonymous = request.args.get('anonymous', 'false').lower() == 'true'
         mongo.db.query_history.insert_one({
             'user_id': current_user.id,
             'query_type': 'statistics',
             'is_anonymous': is_anonymous,
-            'query_params': {'year': current_year},
+            'query_params': {'start_date': start_date, 'end_date': end_date},
             'query_time': datetime.now()
         })
         
         return jsonify({
             'success': True,
             'data': {
-                'record_types': {item['_id']: item['count'] for item in record_types},
-                'monthly_records': {item['_id']: item['count'] for item in monthly_stats},
+                'record_types': record_types_stats,
+                'time_stats': time_stats,
                 'vital_signs': vital_sign_data,
-                'medications': {item['_id']: item['count'] for item in medication_stats}
+                'medications': {item['_id']: item['count'] for item in medication_stats},
+                'doctor_stats': doctor_stats,
+                'prescription_stats': prescription_stats,
+                'appointment_stats': appointment_stats,
+                'total_records': len(mongo_records),
+                'total_doctors': len(doctor_stats)
             }
         })
     except Exception as e:

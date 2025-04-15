@@ -43,6 +43,7 @@ def create_app(config_name="development"):
     from .routers.health_records import health_bp
     from .routers.notifications import notifications_bp
     from .routers.doctor import doctor_bp
+    from .routers.patient import patient_bp
     
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
@@ -50,6 +51,7 @@ def create_app(config_name="development"):
     app.register_blueprint(health_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(doctor_bp)
+    app.register_blueprint(patient_bp)
     
     # 确保上传目录存在
     import os

@@ -365,7 +365,21 @@ def get_current_user():
         if current_user.last_login_at:
             user_data['last_login_formatted'] = current_user.last_login_at.strftime('%Y-%m-%d %H:%M:%S')
         else:
-            user_data['last_login_formatted'] = '从未登录'
+            user_data['last_login_formatted'] = '从未登录'  
+        
+        # 对于患者角色，添加统计数据
+        if current_user.role == Role.PATIENT:
+            from ..models import HealthRecord, Appointment, Prescription
+            
+            records_count = HealthRecord.query.filter_by(patient_id=current_user.id).count()
+            appointments_count = Appointment.query.filter_by(patient_id=current_user.id).count()
+            prescriptions_count = Prescription.query.filter_by(patient_id=current_user.id).count()
+            
+            user_data['statistics'] = {
+                'records_count': records_count,
+                'appointments_count': appointments_count,
+                'prescriptions_count': prescriptions_count
+            }
             
         return jsonify({
             'success': True,
@@ -382,6 +396,12 @@ def get_current_user():
 @login_required
 def update_user():
     data = request.json
+    if not data:
+        return jsonify({
+            'success': False,
+            'message': '未提供更新数据'
+        }), 400
+    
     user = current_user
     
     # 更新基本信息
@@ -389,16 +409,30 @@ def update_user():
         user.full_name = data['full_name']
     if 'phone' in data:
         user.phone = data['phone']
+    if 'avatar' in data:
+        user.avatar = data['avatar']
     
     # 根据角色更新对应的详细信息
     if user.role == Role.PATIENT and 'patient_info' in data:
         patient_info = user.patient_info or PatientInfo(user_id=user.id)
         patient_data = data['patient_info']
         
+        # 处理基本字段
         for field in ['gender', 'address', 'emergency_contact', 'emergency_phone', 
                      'medical_history', 'allergies']:
             if field in patient_data:
                 setattr(patient_info, field, patient_data[field])
+        
+        # 特殊处理日期字段
+        if 'date_of_birth' in patient_data:
+            try:
+                date_value = patient_data['date_of_birth']
+                if date_value:
+                    patient_info.date_of_birth = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+                else:
+                    patient_info.date_of_birth = None
+            except (ValueError, TypeError) as e:
+                current_app.logger.error(f"解析出生日期失败: {str(e)}")
         
         if patient_info.id is None:
             db.session.add(patient_info)
@@ -429,6 +463,18 @@ def update_user():
     
     try:
         db.session.commit()
+        
+        # 记录操作
+        log_user(
+            message=f'用户{user.username}更新了个人资料',
+            details={
+                'user_id': user.id,
+                'update_fields': list(data.keys()),
+                'update_time': datetime.now().isoformat()
+            },
+            user_id=user.id
+        )
+        
         return jsonify({
             'success': True,
             'message': '用户信息已更新',
