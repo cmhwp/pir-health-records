@@ -369,15 +369,14 @@ def get_current_user():
         
         # 对于患者角色，添加统计数据
         if current_user.role == Role.PATIENT:
-            from ..models import HealthRecord, Appointment, Prescription
+            from ..models import HealthRecord, Prescription
             
+            # 获取用户统计信息
             records_count = HealthRecord.query.filter_by(patient_id=current_user.id).count()
-            appointments_count = Appointment.query.filter_by(patient_id=current_user.id).count()
             prescriptions_count = Prescription.query.filter_by(patient_id=current_user.id).count()
-            
-            user_data['statistics'] = {
+
+            user_data['stats'] = {
                 'records_count': records_count,
-                'appointments_count': appointments_count,
                 'prescriptions_count': prescriptions_count
             }
             

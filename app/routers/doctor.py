@@ -1,14 +1,13 @@
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify, current_app, g, flash, redirect, url_for
 from flask_login import login_required, current_user
-from ..models import db, User, Role, HealthRecord, RecordFile, RecordType, RecordVisibility, QueryHistory
+from werkzeug.utils import secure_filename
+from ..models import db, User, Role, HealthRecord, RecordFile, RecordType, RecordVisibility
+from ..models.notification import Notification, NotificationType
+from ..models.prescription import Prescription, PrescriptionStatus, PrescriptionItem
 from ..models.health_records import (
     format_mongo_id, mongo_health_record_to_dict, get_mongo_health_record,
-    batch_get_mongo_records
+    batch_get_mongo_records,QueryHistory,
 )
-from ..models.appointment import Appointment, AppointmentStatus
-from ..models.notification import Notification, NotificationType
-# 导入处方模型
-from ..models.prescription import Prescription, PrescriptionStatus
 from ..routers.auth import role_required
 from ..utils.pir_utils import (
     PIRQuery, prepare_pir_database, 
@@ -18,15 +17,20 @@ from ..utils.mongo_utils import mongo, get_mongo_db
 from ..utils.encryption_utils import encrypt_record, decrypt_record, verify_record_integrity
 from ..utils.log_utils import log_record
 from bson.objectid import ObjectId
+import hashlib
 import os
-import uuid
-from datetime import datetime, timedelta
+import base64
 import json
-from werkzeug.utils import secure_filename
-from sqlalchemy import func, distinct
+import io
+import csv
+import re
+from datetime import datetime, timedelta
+import uuid
+from sqlalchemy import func, desc, distinct
 
 # 创建蓝图
 doctor_bp = Blueprint('doctor', __name__, url_prefix='/api/doctor')
+
 
 # 确保上传目录存在
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads', 'encrypted_records')
@@ -1108,361 +1112,6 @@ def get_patient_details(patient_id):
             'message': f'获取患者详情失败: {str(e)}'
         }), 500
 
-# 获取医生的预约列表
-@doctor_bp.route('/appointments', methods=['GET'])
-@login_required
-@role_required(Role.DOCTOR)
-def get_doctor_appointments():
-    try:
-        page = request.args.get('page', 1, type=int)
-        per_page = min(request.args.get('per_page', 20, type=int), 100)
-        
-        # 日期筛选
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
-        date_filter = request.args.get('date_filter', 'all')  # all, today, upcoming, past
-        
-        # 状态筛选
-        status = request.args.get('status')  # pending, confirmed, cancelled, completed
-        
-        # 将Appointment导入避免出错
-        
-        query = Appointment.query.filter_by(doctor_id=current_user.id)
-        
-        # 日期过滤
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        if date_filter == 'today':
-            query = query.filter(
-                func.date(Appointment.appointment_time) == today.date()
-            )
-        elif date_filter == 'upcoming':
-            query = query.filter(
-                Appointment.appointment_time >= today
-            )
-        elif date_filter == 'past':
-            query = query.filter(
-                Appointment.appointment_time < today
-            )
-            
-        if start_date:
-            try:
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-                query = query.filter(Appointment.appointment_time >= start_date)
-            except ValueError:
-                pass
-                
-        if end_date:
-            try:
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-                end_date = end_date.replace(hour=23, minute=59, second=59)
-                query = query.filter(Appointment.appointment_time <= end_date)
-            except ValueError:
-                pass
-        
-        # 状态过滤
-        if status:
-            try:
-                status_enum = AppointmentStatus(status)
-                query = query.filter_by(status=status_enum)
-            except ValueError:
-                pass
-        
-        # 排序
-        sort_field = request.args.get('sort_by', 'appointment_time')
-        sort_order = request.args.get('sort_order', 'asc')
-        
-        if sort_order == 'desc':
-            query = query.order_by(getattr(Appointment, sort_field).desc())
-        else:
-            query = query.order_by(getattr(Appointment, sort_field).asc())
-        
-        # 分页
-        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-        appointments = pagination.items
-        
-        # 处理结果
-        result = []
-        for appointment in appointments:
-            patient = User.query.get(appointment.patient_id)
-            
-            result.append({
-                'id': appointment.id,
-                'patient_id': appointment.patient_id,
-                'patient_name': patient.full_name if patient else "未知患者",
-                'appointment_time': appointment.appointment_time.isoformat() if appointment.appointment_time else None,
-                'duration': appointment.duration,
-                'purpose': appointment.purpose,
-                'status': appointment.status.value,
-                'notes': appointment.notes,
-                'created_at': appointment.created_at.isoformat() if appointment.created_at else None
-            })
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'appointments': result,
-                'pagination': {
-                    'total': pagination.total,
-                    'pages': pagination.pages,
-                    'page': page,
-                    'per_page': per_page,
-                    'has_next': pagination.has_next,
-                    'has_prev': pagination.has_prev
-                }
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"获取预约列表失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取预约列表失败: {str(e)}'
-        }), 500
-
-# 创建预约
-@doctor_bp.route('/appointments', methods=['POST'])
-@login_required
-@role_required(Role.DOCTOR)
-def create_appointment():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({
-                'success': False,
-                'message': '未提供预约数据'
-            }), 400
-        
-        required_fields = ['patient_id', 'appointment_time', 'duration', 'purpose']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({
-                    'success': False,
-                    'message': f'缺少必要字段: {field}'
-                }), 400
-        
-        # 验证患者存在
-        patient = User.query.get(data['patient_id'])
-        if not patient or not patient.has_role(Role.PATIENT):
-            return jsonify({
-                'success': False,
-                'message': '指定的患者不存在或无效'
-            }), 404
-        
-        # 解析预约时间
-        try:
-            appointment_time = datetime.fromisoformat(data['appointment_time'])
-        except ValueError:
-            return jsonify({
-                'success': False,
-                'message': '预约时间格式无效'
-            }), 400
-        
-        # 检查医生的时间冲突
-        doctor_conflict = Appointment.query.filter(
-            Appointment.doctor_id == current_user.id,
-            Appointment.status != AppointmentStatus.CANCELLED,
-            Appointment.appointment_time <= appointment_time + timedelta(minutes=data['duration']),
-            Appointment.appointment_time + timedelta(minutes=Appointment.duration) >= appointment_time
-        ).first()
-        
-        if doctor_conflict:
-            return jsonify({
-                'success': False,
-                'message': '您在该时间段已有其他预约'
-            }), 409
-        
-        # 检查患者的时间冲突
-        patient_conflict = Appointment.query.filter(
-            Appointment.patient_id == data['patient_id'],
-            Appointment.status != AppointmentStatus.CANCELLED,
-            Appointment.appointment_time <= appointment_time + timedelta(minutes=data['duration']),
-            Appointment.appointment_time + timedelta(minutes=Appointment.duration) >= appointment_time
-        ).first()
-        
-        if patient_conflict:
-            return jsonify({
-                'success': False,
-                'message': '患者在该时间段已有其他预约'
-            }), 409
-        
-        # 创建预约
-        appointment = Appointment(
-            doctor_id=current_user.id,
-            patient_id=data['patient_id'],
-            appointment_time=appointment_time,
-            duration=data['duration'],
-            purpose=data['purpose'],
-            notes=data.get('notes', ''),
-            status=AppointmentStatus.CONFIRMED
-        )
-        
-        db.session.add(appointment)
-        
-        # 记录操作
-        log_record(
-            message=f'医生{current_user.full_name}为患者{patient.full_name}创建了预约',
-            details={
-                'doctor_id': current_user.id,
-                'patient_id': data['patient_id'],
-                'appointment_id': appointment.id,
-                'appointment_time': appointment_time.isoformat(),
-                'creation_time': datetime.now().isoformat()
-            }
-        )
-        
-        # 添加通知
-        
-        notification = Notification(
-            user_id=data['patient_id'],
-            type=NotificationType.APPOINTMENT,
-            title=f"医生{current_user.full_name}为您创建了预约",
-            content=f"预约时间: {appointment_time.strftime('%Y-%m-%d %H:%M')}, 目的: {data['purpose']}",
-            data={
-                'appointment_id': appointment.id,
-                'doctor_id': current_user.id,
-                'doctor_name': current_user.full_name,
-                'appointment_time': appointment_time.isoformat()
-            },
-            is_read=False
-        )
-        
-        db.session.add(notification)
-        db.session.commit()
-        
-        return jsonify({
-            'success': True,
-            'message': '预约创建成功',
-            'data': {
-                'appointment_id': appointment.id
-            }
-        }), 201
-        
-    except Exception as e:
-        current_app.logger.error(f"创建预约失败: {str(e)}")
-        db.session.rollback()
-        return jsonify({
-            'success': False,
-            'message': f'创建预约失败: {str(e)}'
-        }), 500
-
-# 更新预约状态
-@doctor_bp.route('/appointments/<int:appointment_id>', methods=['PUT'])
-@login_required
-@role_required(Role.DOCTOR)
-def update_appointment(appointment_id):
-    try:
-        from ..models.appointment import Appointment, AppointmentStatus
-        
-        # 获取预约
-        appointment = Appointment.query.get(appointment_id)
-        if not appointment:
-            return jsonify({
-                'success': False,
-                'message': '预约不存在'
-            }), 404
-        
-        # 验证医生是否有权限操作
-        if appointment.doctor_id != current_user.id:
-            return jsonify({
-                'success': False,
-                'message': '没有权限操作此预约'
-            }), 403
-        
-        data = request.json
-        if not data:
-            return jsonify({
-                'success': False,
-                'message': '未提供更新数据'
-            }), 400
-        
-        # 更新预约状态
-        if 'status' in data:
-            try:
-                new_status = AppointmentStatus(data['status'])
-                appointment.status = new_status
-            except ValueError:
-                return jsonify({
-                    'success': False,
-                    'message': '无效的预约状态'
-                }), 400
-        
-        # 更新预约时间
-        if 'appointment_time' in data:
-            try:
-                appointment_time = datetime.fromisoformat(data['appointment_time'])
-                appointment.appointment_time = appointment_time
-            except ValueError:
-                return jsonify({
-                    'success': False,
-                    'message': '预约时间格式无效'
-                }), 400
-        
-        # 更新其他字段
-        for field in ['duration', 'purpose', 'notes']:
-            if field in data:
-                setattr(appointment, field, data[field])
-        
-        appointment.updated_at = datetime.now()
-        
-        # 获取患者信息
-        patient = User.query.get(appointment.patient_id)
-        
-        # 记录操作
-        log_record(
-            message=f'医生{current_user.full_name}更新了患者{patient.full_name if patient else "未知"}的预约',
-            details={
-                'doctor_id': current_user.id,
-                'patient_id': appointment.patient_id,
-                'appointment_id': appointment.id,
-                'update_fields': list(data.keys()),
-                'update_time': datetime.now().isoformat()
-            }
-        )
-        
-        # 添加通知
-        if 'status' in data or 'appointment_time' in data:
-            
-            content = "您的预约已更新"
-            if 'status' in data:
-                content = f"您的预约状态已更新为: {data['status']}"
-            elif 'appointment_time' in data:
-                content = f"您的预约时间已更改为: {appointment_time.strftime('%Y-%m-%d %H:%M')}"
-            
-            notification = Notification(
-                user_id=appointment.patient_id,
-                type=NotificationType.APPOINTMENT,
-                title=f"医生{current_user.full_name}更新了您的预约",
-                content=content,
-                data={
-                    'appointment_id': appointment.id,
-                    'doctor_id': current_user.id,
-                    'doctor_name': current_user.full_name,
-                    'update_fields': list(data.keys())
-                },
-                is_read=False
-            )
-            
-            db.session.add(notification)
-        
-        db.session.commit()
-        
-        return jsonify({
-            'success': True,
-            'message': '预约更新成功',
-            'data': {
-                'appointment_id': appointment.id
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"更新预约失败: {str(e)}")
-        db.session.rollback()
-        return jsonify({
-            'success': False,
-            'message': f'更新预约失败: {str(e)}'
-        }), 500
-
 # 获取处方列表
 @doctor_bp.route('/prescriptions', methods=['GET'])
 @login_required
@@ -1528,7 +1177,6 @@ def get_prescriptions():
             patient = User.query.get(prescription.patient_id)
             
             # 获取处方药品
-            from ..models.prescription import PrescriptionItem
             items = PrescriptionItem.query.filter_by(prescription_id=prescription.id).all()
             
             prescription_items = []
@@ -1662,21 +1310,76 @@ def create_prescription():
         )
         
         # 添加通知
-        
         notification = Notification(
             user_id=data['patient_id'],
-            type=NotificationType.PRESCRIPTION,
+            notification_type=NotificationType.PRESCRIPTION,
             title=f"医生{current_user.full_name}为您开具了处方",
-            content=f"诊断: {data['diagnosis']}, 包含{len(items)}种药品",
-            data={
-                'prescription_id': prescription.id,
-                'doctor_id': current_user.id,
-                'doctor_name': current_user.full_name
-            },
+            message=f"诊断: {data['diagnosis']}, 包含{len(items)}种药品",
+            related_id=str(prescription.id),
             is_read=False
         )
         
         db.session.add(notification)
+        
+        # 创建健康记录和用药记录
+        try:
+            # 导入必要的类
+            from ..models.health_records import HealthRecord, RecordType, RecordVisibility, MedicationRecord
+            
+            # 创建健康记录
+            health_record = HealthRecord(
+                patient_id=data['patient_id'],
+                doctor_id=current_user.id,
+                record_type=RecordType.MEDICATION,
+                title=f"处方: {data['diagnosis']}",
+                record_date=datetime.now(),
+                visibility=RecordVisibility.DOCTOR
+            )
+            
+            db.session.add(health_record)
+            db.session.flush()  # 获取记录ID
+            
+            # 为每种药品创建用药记录
+            for item in items:
+                medication_record = MedicationRecord.from_prescription_item(
+                    record_id=health_record.id,
+                    prescription_id=prescription.id,
+                    item=item
+                )
+                db.session.add(medication_record)
+            
+            # 保存到MongoDB
+            mongo_data = {
+                'patient_id': data['patient_id'],
+                'doctor_id': current_user.id,
+                'record_type': RecordType.MEDICATION.value,
+                'title': f"处方: {data['diagnosis']}",
+                'diagnosis': data['diagnosis'],
+                'instructions': data.get('instructions', ''),
+                'prescription_id': prescription.id,
+                'medications': [
+                    {
+                        'medication_name': item.medicine_name,
+                        'dosage': item.dosage,
+                        'frequency': item.frequency,
+                        'duration': item.duration,
+                        'instructions': item.notes
+                    } for item in items
+                ],
+                'record_date': datetime.now(),
+                'visibility': RecordVisibility.DOCTOR.value
+            }
+            
+            # 保存到MongoDB
+            mongo_id = store_health_record_mongodb(mongo_data, data['patient_id'])
+            
+            # 更新MySQL记录的mongo_id
+            health_record.mongo_id = mongo_id
+            
+        except Exception as e:
+            # 记录错误但不阻止处方创建
+            current_app.logger.error(f"创建用药记录失败: {str(e)}")
+        
         db.session.commit()
         
         return jsonify({
@@ -1772,15 +1475,10 @@ def update_prescription(prescription_id):
             
             notification = Notification(
                 user_id=prescription.patient_id,
-                type=NotificationType.PRESCRIPTION,
+                notification_type=NotificationType.PRESCRIPTION,
                 title=f"医生{current_user.full_name}已撤销您的处方",
-                content=f"处方ID: {prescription.id}, 诊断: {prescription.diagnosis}",
-                data={
-                    'prescription_id': prescription.id,
-                    'doctor_id': current_user.id,
-                    'doctor_name': current_user.full_name,
-                    'status': 'REVOKED'
-                },
+                message=f"处方ID: {prescription.id}, 诊断: {prescription.diagnosis}",
+                related_id=str(prescription.id),
                 is_read=False
             )
             
@@ -2085,6 +1783,262 @@ def get_disease_statistics():
             'success': False,
             'message': f'获取疾病统计失败: {str(e)}'
         }), 500
+
+# 医生处理处方申请
+@doctor_bp.route('/prescriptions/pending', methods=['GET'])
+@login_required
+@role_required(Role.DOCTOR)
+def get_pending_prescriptions():
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        
+        # 获取待处理的处方申请
+        query = Prescription.query.filter_by(
+            doctor_id=current_user.id, 
+            status=PrescriptionStatus.PENDING
+        ).order_by(Prescription.created_at.desc())
+        
+        # 分页
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        prescriptions = pagination.items
+        
+        # 处理结果
+        result = []
+        for prescription in prescriptions:
+            patient = User.query.get(prescription.patient_id)
+            
+            # 获取处方药品
+            items = PrescriptionItem.query.filter_by(prescription_id=prescription.id).all()
+            
+            prescription_items = []
+            for item in items:
+                prescription_items.append({
+                    'id': item.id,
+                    'medicine_name': item.medicine_name,
+                    'dosage': item.dosage,
+                    'frequency': item.frequency,
+                    'duration': item.duration,
+                    'notes': item.notes
+                })
+            
+            prescription_data = {
+                'id': prescription.id,
+                'patient_id': prescription.patient_id,
+                'patient_name': patient.full_name if patient else "未知患者",
+                'symptoms': prescription.symptoms,  # 添加患者症状字段
+                'diagnosis': prescription.diagnosis,
+                'instructions': prescription.instructions,
+                'status': prescription.status.value,
+                'items': prescription_items,
+                'created_at': prescription.created_at.isoformat() if prescription.created_at else None,
+            }
+            
+            # 添加患者信息
+            if patient and patient.patient_info:
+                prescription_data['patient_info'] = {
+                    'gender': patient.patient_info.gender,
+                    'date_of_birth': patient.patient_info.date_of_birth.isoformat() if patient.patient_info.date_of_birth else None,
+                    'allergies': patient.patient_info.allergies
+                }
+                
+            result.append(prescription_data)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'prescriptions': result,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'page': page,
+                    'per_page': per_page,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取待处理处方失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取待处理处方失败: {str(e)}'
+        }), 500
+
+# 处理处方申请
+@doctor_bp.route('/prescriptions/<int:prescription_id>/process', methods=['PUT'])
+@login_required
+@role_required(Role.DOCTOR)
+def process_prescription_request(prescription_id):
+    try:
+        # 获取处方
+        prescription = Prescription.query.get(prescription_id)
+        if not prescription:
+            return jsonify({
+                'success': False,
+                'message': '处方不存在'
+            }), 404
+        
+        # 验证医生是否有权限操作
+        if prescription.doctor_id != current_user.id:
+            return jsonify({
+                'success': False,
+                'message': '没有权限操作此处方'
+            }), 403
+        
+        # 验证处方状态
+        if prescription.status != PrescriptionStatus.PENDING:
+            return jsonify({
+                'success': False,
+                'message': '只能处理待确认状态的处方申请'
+            }), 400
+        
+        data = request.json
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': '未提供处理数据'
+            }), 400
+        
+        # 获取处理决定
+        action = data.get('action')
+        if not action or action not in ['approve', 'reject']:
+            return jsonify({
+                'success': False,
+                'message': '无效的处理操作，必须是 approve 或 reject'
+            }), 400
+        
+        # 获取患者信息
+        patient = User.query.get(prescription.patient_id)
+        
+        if action == 'approve':
+            # 医生必须提供诊断结果
+            if 'diagnosis' not in data or not data['diagnosis'].strip():
+                return jsonify({
+                    'success': False,
+                    'message': '批准处方时必须提供诊断结果'
+                }), 400
+            
+            # 更新处方状态为激活
+            prescription.status = PrescriptionStatus.ACTIVE
+            
+            # 更新处方信息
+            prescription.diagnosis = data['diagnosis']
+                
+            if 'instructions' in data:
+                prescription.instructions = data['instructions']
+                
+            # 设置有效期（默认为30天）
+            valid_days = data.get('valid_days', 30)
+            prescription.valid_until = datetime.now() + timedelta(days=valid_days)
+            
+            # 处理药品项目 - 必须指定至少一种药品
+            items_data = data.get('items', [])
+            if not items_data or not isinstance(items_data, list) or len(items_data) == 0:
+                return jsonify({
+                    'success': False,
+                    'message': '批准处方时必须指定至少一种药品'
+                }), 400
+                
+            # 清除现有药品并添加医生开具的药品（总是替换全部）
+            PrescriptionItem.query.filter_by(prescription_id=prescription.id).delete()
+            
+            # 添加新药品
+            for item_data in items_data:
+                if 'medicine_name' not in item_data or not item_data['medicine_name'].strip():
+                    continue
+                    
+                if 'dosage' not in item_data or not item_data['dosage'].strip():
+                    continue
+                    
+                item = PrescriptionItem(
+                    prescription_id=prescription.id,
+                    medicine_name=item_data['medicine_name'],
+                    dosage=item_data['dosage'],
+                    frequency=item_data.get('frequency', ''),
+                    duration=item_data.get('duration', ''),
+                    notes=item_data.get('notes', '')
+                )
+                db.session.add(item)
+            
+            # 获取更新后的药品数量
+            items_count = PrescriptionItem.query.filter_by(prescription_id=prescription.id).count()
+            if items_count == 0:
+                return jsonify({
+                    'success': False,
+                    'message': '处方中必须包含至少一种有效药品'
+                }), 400
+            
+            # 发送通知给患者
+            notification = Notification(
+                user_id=prescription.patient_id,
+                notification_type=NotificationType.PRESCRIPTION,
+                title=f"医生{current_user.full_name}已批准您的处方申请",
+                message=f"您报告的症状: {prescription.symptoms}\n医生诊断: {prescription.diagnosis}\n已为您开具包含{items_count}种药品的处方，请查看详情",
+                related_id=str(prescription.id),
+                is_read=False
+            )
+            
+            db.session.add(notification)
+            
+            message = '处方申请已批准并激活'
+            
+        else:  # 拒绝处方
+            # 更新处方状态为已撤销/拒绝
+            prescription.status = PrescriptionStatus.REVOKED
+            
+            # 记录拒绝原因
+            rejection_reason = data.get('reason', '不满足开具处方的条件')
+            prescription.instructions = f"申请被拒绝。原因: {rejection_reason}"
+            
+            # 发送通知给患者
+            notification = Notification(
+                user_id=prescription.patient_id,
+                notification_type=NotificationType.PRESCRIPTION,
+                title=f"医生{current_user.full_name}未批准您的处方申请",
+                message=f"原因: {rejection_reason}",
+                related_id=str(prescription.id),
+                is_read=False
+            )
+            
+            db.session.add(notification)
+            
+            message = '处方申请已拒绝'
+        
+        prescription.updated_at = datetime.now()
+        
+        # 记录操作
+        log_record(
+            message=f'医生{current_user.full_name}{message}，患者: {patient.full_name if patient else "未知"}',
+            details={
+                'doctor_id': current_user.id,
+                'patient_id': prescription.patient_id,
+                'prescription_id': prescription.id,
+                'action': action,
+                'update_time': datetime.now().isoformat()
+            }
+        )
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+            'data': {
+                'prescription_id': prescription.id,
+                'status': prescription.status.value
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"处理处方申请失败: {str(e)}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': f'处理处方申请失败: {str(e)}'
+        }), 500
+
 # 删除健康记录
 @doctor_bp.route('/records/<record_id>', methods=['DELETE'])
 @login_required

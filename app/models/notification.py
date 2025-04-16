@@ -3,11 +3,13 @@ from datetime import datetime
 import enum
 
 class NotificationType(enum.Enum):
-    SYSTEM = "system"              # 系统通知
-    RECORD_SHARED = "record_shared"  # 记录共享通知
-    RECORD_ACCESS = "record_access"  # 记录被访问通知
-    HEALTH_ALERT = "health_alert"    # 健康提醒/警报
-    MESSAGE = "message"            # 一般消息
+    MESSAGE = "message"                    # 消息通知
+    SYSTEM = "system"                      # 系统通知
+    RECORD = "record"                      # 健康记录通知
+    SHARE = "share"                        # 记录共享通知
+    APPOINTMENT = "appointment"            # 预约通知
+    PRESCRIPTION = "prescription"          # 处方通知
+    PRESCRIPTION_REQUEST = "prescription_request"  # 处方申请通知
 
 class Notification(db.Model):
     """通知模型"""

@@ -231,6 +231,7 @@ class MedicationRecord(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     record_id = db.Column(db.Integer, db.ForeignKey('health_records.id'), nullable=False)
+    prescription_id = db.Column(db.Integer, db.ForeignKey('prescriptions.id'), nullable=True)  # 关联的处方ID，可为空
     medication_name = db.Column(db.String(100), nullable=False)  # 药品名称
     dosage = db.Column(db.String(50), nullable=True)  # 剂量
     frequency = db.Column(db.String(50), nullable=True)  # 频率
@@ -238,13 +239,31 @@ class MedicationRecord(db.Model):
     end_date = db.Column(db.Date, nullable=True)  # 结束日期
     instructions = db.Column(db.Text, nullable=True)  # 用药说明
     side_effects = db.Column(db.Text, nullable=True)  # 副作用
+    is_prescribed = db.Column(db.Boolean, default=False)  # 是否是通过处方开具的药物
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # 关系
+    health_record = db.relationship('HealthRecord', foreign_keys=[record_id], backref='medications')
+    
+    @classmethod
+    def from_prescription_item(cls, record_id, prescription_id, item):
+        """从处方项目创建用药记录"""
+        return cls(
+            record_id=record_id,
+            prescription_id=prescription_id,
+            medication_name=item.medicine_name,
+            dosage=item.dosage,
+            frequency=item.frequency,
+            instructions=item.notes,
+            is_prescribed=True
+        )
     
     def to_dict(self):
         return {
             'id': self.id,
             'record_id': self.record_id,
+            'prescription_id': self.prescription_id,
             'medication_name': self.medication_name,
             'dosage': self.dosage,
             'frequency': self.frequency,
@@ -252,8 +271,7 @@ class MedicationRecord(db.Model):
             'end_date': self.end_date.isoformat() if self.end_date else None,
             'instructions': self.instructions,
             'side_effects': self.side_effects,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'is_prescribed': self.is_prescribed
         }
 
 
@@ -438,8 +456,25 @@ class SharedRecord(db.Model):
     
     def record_access(self):
         """记录一次访问"""
-        self.access_count += 1
-        self.last_accessed = datetime.now()
+        from flask import current_app
+        from app import db
+        
+        try:
+            self.access_count += 1
+            self.last_accessed = datetime.now()
+            
+            # 记录访问日志
+            current_app.logger.info(f"记录访问: ID={self.id}, 访问次数={self.access_count}, 时间={self.last_accessed}")
+            
+            # 确保更改被保存到数据库
+            db.session.add(self)
+            db.session.commit()
+            
+            return True
+        except Exception as e:
+            current_app.logger.error(f"记录访问失败: {str(e)}")
+            db.session.rollback()
+            return False
 
 def format_mongo_id(id_value):
     """将字符串ID格式化为ObjectId"""

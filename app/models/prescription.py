@@ -3,10 +3,11 @@ from datetime import datetime
 from . import db
 
 class PrescriptionStatus(Enum):
-    ACTIVE = "ACTIVE"
-    COMPLETED = "COMPLETED"
-    EXPIRED = "EXPIRED"
-    REVOKED = "REVOKED"
+    PENDING = "PENDING"      # 待确认/处理
+    ACTIVE = "ACTIVE"        # 已激活/有效
+    COMPLETED = "COMPLETED"  # 已完成/已使用
+    EXPIRED = "EXPIRED"      # 已过期
+    REVOKED = "REVOKED"      # 已撤销/拒绝
 
 class Prescription(db.Model):
     __tablename__ = 'prescriptions'
@@ -14,6 +15,7 @@ class Prescription(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     patient_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     doctor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    symptoms = db.Column(db.Text, nullable=True)  # 患者症状描述
     diagnosis = db.Column(db.String(500), nullable=False)
     instructions = db.Column(db.Text)
     status = db.Column(db.Enum(PrescriptionStatus), default=PrescriptionStatus.ACTIVE)

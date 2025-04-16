@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 import json
-from sqlalchemy import desc, func, distinct, or_
+from sqlalchemy import desc, func, distinct, or_, case
 import math
 import secrets
 import random
@@ -751,21 +751,12 @@ def get_health_statistics():
                 doctor_stats.append(doctor_data)
         
         # 获取预约和处方统计
-        from ..models.appointment import Appointment, AppointmentStatus
         from ..models.prescription import Prescription, PrescriptionStatus
         
         # 处方统计
         prescription_stats = {}
         for status in PrescriptionStatus:
             prescription_stats[status.value] = Prescription.query.filter_by(
-                patient_id=current_user.id,
-                status=status
-            ).count()
-        
-        # 预约统计
-        appointment_stats = {}
-        for status in AppointmentStatus:
-            appointment_stats[status.value] = Appointment.query.filter_by(
                 patient_id=current_user.id,
                 status=status
             ).count()
@@ -789,7 +780,6 @@ def get_health_statistics():
                 'medications': {item['_id']: item['count'] for item in medication_stats},
                 'doctor_stats': doctor_stats,
                 'prescription_stats': prescription_stats,
-                'appointment_stats': appointment_stats,
                 'total_records': len(mongo_records),
                 'total_doctors': len(doctor_stats)
             }
@@ -1011,7 +1001,7 @@ def share_health_record(record_id):
         # 检查记录是否已经与该用户分享
         existing_share = SharedRecord.query.filter_by(
             record_id=sql_record.id,
-            shared_with_id=target_user.id
+            shared_with=target_user.id
         ).first()
         
         if existing_share:
@@ -1028,7 +1018,7 @@ def share_health_record(record_id):
                     details={
                         'owner_id': current_user.id,
                         'owner_username': current_user.username,
-                        'shared_with_id': target_user.id,
+                        'shared_with': target_user.id,
                         'shared_with_username': target_user.username,
                         'record_id': str(mongo_id),
                         'sql_id': sql_record.id,
@@ -1041,15 +1031,10 @@ def share_health_record(record_id):
                 # 创建通知
                 notification = Notification(
                     user_id=target_user.id,
-                    type=NotificationType.RECORD_SHARE_UPDATE,
+                    notification_type=NotificationType.SHARE,
+                    title='健康记录共享权限更新',
                     message=f'{current_user.username}更新了与您共享的健康记录权限',
-                    data=json.dumps({
-                        'record_id': str(mongo_id),
-                        'record_title': sql_record.title,
-                        'sharer_id': current_user.id,
-                        'sharer_name': current_user.username,
-                        'permission': str(permission)
-                    })
+                    related_id=str(mongo_id)
                 )
                 db.session.add(notification)
                 db.session.commit()
@@ -1084,10 +1069,11 @@ def share_health_record(record_id):
             # 创建共享记录
             shared_record = SharedRecord(
                 record_id=sql_record.id,
+                mongo_record_id=str(mongo_id),  # 设置MongoDB记录ID
                 owner_id=current_user.id,
-                shared_with_id=target_user.id,
+                shared_with=target_user.id,
                 permission=permission,
-                expiry=expiry,
+                expires_at=expiry,
                 access_key=secrets.token_urlsafe(16)
             )
             db.session.add(shared_record)
@@ -1098,7 +1084,7 @@ def share_health_record(record_id):
                 details={
                     'owner_id': current_user.id,
                     'owner_username': current_user.username,
-                    'shared_with_id': target_user.id,
+                    'shared_with': target_user.id,
                     'shared_with_username': target_user.username,
                     'record_id': str(mongo_id),
                     'sql_id': sql_record.id,
@@ -1112,26 +1098,15 @@ def share_health_record(record_id):
             # 创建通知
             notification = Notification(
                 user_id=target_user.id,
-                type=NotificationType.RECORD_SHARED,
-                message=f'{current_user.username}与您共享了一份健康记录',
-                data=json.dumps({
-                    'record_id': str(mongo_id),
-                    'record_title': sql_record.title,
-                    'sharer_id': current_user.id,
-                    'sharer_name': current_user.username,
-                    'permission': str(permission),
-                    'share_id': shared_record.id  # 这里会在commit后自动填充
-                })
+                notification_type=NotificationType.SHARE,
+                title='新的健康记录共享',
+                message=f'{current_user.username}与您共享了一份健康记录"{sql_record.title}"',
+                related_id=str(mongo_id)
             )
             db.session.add(notification)
             db.session.commit()
             
-            # 更新通知数据，保证sharedRecord.id已经存在
-            notification_data = json.loads(notification.data)
-            notification_data['share_id'] = shared_record.id
-            notification.data = json.dumps(notification_data)
-            db.session.commit()
-            
+            # 直接返回成功消息，无需尝试更新通知的不存在的data属性
             return jsonify({
                 'success': True,
                 'message': '记录分享成功',
@@ -1174,7 +1149,7 @@ def get_records_shared_by_me():
         # 应用过滤器
         if 'shared_with' in request.args:
             query = query.filter_by(shared_with=request.args.get('shared_with', type=int))
-            
+        
         if 'valid_only' in request.args and request.args.get('valid_only').lower() == 'true':
             query = query.filter(
                 (SharedRecord.expires_at == None) | (SharedRecord.expires_at > datetime.now())
@@ -1215,6 +1190,7 @@ def get_records_shared_by_me():
                 'is_valid': shared.is_valid(),
                 'access_count': shared.access_count,
                 'last_accessed': shared.last_accessed.isoformat() if shared.last_accessed else None,
+                'access_key': shared.access_key,  # 添加访问密钥
                 'record_info': {
                     'title': mongo_record['title'] if mongo_record else None,
                     'record_type': mongo_record['record_type'] if mongo_record else None,
@@ -1341,16 +1317,20 @@ def view_shared_record(shared_id):
         if shared_record.shared_with != current_user.id and shared_record.owner_id != current_user.id:
             return jsonify({
                 'success': False,
-                'message': '您没有权限访问此共享记录'
+                'message': '没有访问权限'
             }), 403
             
         # 检查是否过期
         if not shared_record.is_valid() and shared_record.shared_with == current_user.id:
             return jsonify({
                 'success': False,
-                'message': '此共享记录已过期'
+                'message': '共享已过期'
             }), 403
-        
+            
+        # 如果是被共享用户访问，记录访问情况
+        if shared_record.shared_with == current_user.id:
+            shared_record.record_access()
+            
         # 获取健康记录
         health_record = shared_record.health_record
         if not health_record:
@@ -1369,33 +1349,18 @@ def view_shared_record(shared_id):
                 'message': '记录不存在或已被删除'
             }), 404
             
-        # 如果是被共享用户访问，记录访问情况
-        if shared_record.shared_with == current_user.id:
-            shared_record.record_access()
-            
-            # 创建访问通知给记录所有者
-            notification = Notification(
-                user_id=shared_record.owner_id,
-                sender_id=current_user.id,
-                notification_type=NotificationType.RECORD_ACCESS,
-                title="您共享的记录被访问",
-                message=f"{current_user.username} 访问了您共享的健康记录: {health_record.title}",
-                related_id=shared_record.record_id
-            )
-            db.session.add(notification)
-            db.session.commit()
-            
         # 获取用户信息
         owner = User.query.get(shared_record.owner_id)
-        shared_with = User.query.get(shared_record.shared_with)
+        shared_with_user = User.query.get(shared_record.shared_with)
         
         result = {
-            'shared_info': {
-                'id': shared_record.id,
+            'shared_id': shared_record.id,
+            'record_id': health_record.id,
+            'mongo_id': health_record.mongo_id,
+            'sharing_info': {
                 'permission': shared_record.permission.value,
                 'created_at': shared_record.created_at.isoformat() if shared_record.created_at else None,
                 'expires_at': shared_record.expires_at.isoformat() if shared_record.expires_at else None,
-                'is_valid': shared_record.is_valid(),
                 'access_count': shared_record.access_count,
                 'last_accessed': shared_record.last_accessed.isoformat() if shared_record.last_accessed else None,
                 'owner': {
@@ -1404,9 +1369,9 @@ def view_shared_record(shared_id):
                     'full_name': owner.full_name if owner else None
                 },
                 'shared_with': {
-                    'id': shared_with.id if shared_with else None,
-                    'username': shared_with.username if shared_with else None,
-                    'full_name': shared_with.full_name if shared_with else None
+                    'id': shared_with_user.id if shared_with_user else None,
+                    'username': shared_with_user.username if shared_with_user else None,
+                    'full_name': shared_with_user.full_name if shared_with_user else None
                 }
             },
             'record': record_data,
@@ -1447,7 +1412,7 @@ def revoke_shared_record(shared_id):
             
         # 获取相关信息以便日志记录
         record = HealthRecord.query.get(shared_record.record_id)
-        shared_with_user = User.query.get(shared_record.shared_with_id)
+        shared_with_user = User.query.get(shared_record.shared_with)
         
         revoke_info = {
             'share_id': shared_record.id,
@@ -1456,25 +1421,21 @@ def revoke_shared_record(shared_id):
             'record_title': record.title if record else 'Unknown',
             'owner_id': shared_record.owner_id,
             'owner_username': current_user.username,
-            'shared_with_id': shared_record.shared_with_id,
+            'shared_with': shared_record.shared_with,
             'shared_with_username': shared_with_user.username if shared_with_user else 'Unknown',
             'permission': str(shared_record.permission),
             'created_at': shared_record.created_at.isoformat() if shared_record.created_at else None,
-            'expiry': shared_record.expiry.isoformat() if shared_record.expiry else None
+            'expiry': shared_record.expires_at.isoformat() if shared_record.expires_at else None
         }
         
         # 创建撤销通知
         if shared_with_user:
             notification = Notification(
-                user_id=shared_record.shared_with_id,
-                type=NotificationType.RECORD_SHARE_REVOKED,
+                user_id=shared_record.shared_with,
+                notification_type=NotificationType.SHARE,
+                title="记录共享撤销",
                 message=f'{current_user.username}撤销了与您共享的健康记录',
-                data=json.dumps({
-                    'record_id': record.mongo_id if record else None,
-                    'record_title': record.title if record else 'Unknown',
-                    'sharer_id': shared_record.owner_id,
-                    'sharer_name': current_user.username
-                })
+                related_id=record.mongo_id if record else None
             )
             db.session.add(notification)
         
@@ -3686,4 +3647,282 @@ def batch_update_visibility():
         return jsonify({
             'success': False,
             'message': f'批量更新记录可见性失败: {str(e)}'
+        }), 500
+
+# =========================== 记录共享功能 ===========================
+
+# 获取可共享的用户列表
+@health_bp.route('/share/users', methods=['GET'])
+@login_required
+def get_shareable_users():
+    """获取患者可以共享记录的用户列表，包括医生和其他患者"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        
+        # 搜索条件
+        search_term = request.args.get('search', '')
+        role_filter = request.args.get('role')  # 可以筛选角色：doctor, patient
+        
+        # 基础查询：不包括自己和管理员
+        query = User.query.filter(
+            User.id != current_user.id,  # 排除自己
+            User.role != Role.ADMIN      # 排除管理员
+        )
+        
+        # 按角色过滤
+        if role_filter:
+            try:
+                role_enum = next(r for r in Role if r.value == role_filter)
+                query = query.filter(User.role == role_enum)
+            except (StopIteration, ValueError):
+                pass  # 无效角色，忽略过滤
+        
+        # 搜索
+        if search_term:
+            query = query.filter(or_(
+                User.username.ilike(f'%{search_term}%'),
+                User.full_name.ilike(f'%{search_term}%'),
+                User.email.ilike(f'%{search_term}%')
+            ))
+        
+        # 按最近共享情况排序
+        # 使用简单的排序方式避免SQLAlchemy版本兼容性问题
+        query = query.order_by(User.full_name)
+        
+        # 处理分页
+        pagination = query.paginate(page=page, per_page=per_page)
+        users = pagination.items
+        
+        # 处理结果 - 获取共享计数并手动排序
+        result_with_counts = []
+        for user in users:
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'full_name': user.full_name,
+                'email': user.email,
+                'avatar': user.avatar,
+                'role': user.role.value
+            }
+            
+            # 添加角色特定信息
+            if user.role == Role.DOCTOR and user.doctor_info:
+                user_data['doctor_info'] = {
+                    'specialty': user.doctor_info.specialty,
+                    'hospital': user.doctor_info.hospital,
+                    'department': user.doctor_info.department
+                }
+            elif user.role == Role.PATIENT and user.patient_info:
+                user_data['patient_info'] = {
+                    'gender': user.patient_info.gender
+                }
+                
+            # 获取与该用户的共享记录数量
+            shared_count = SharedRecord.query.filter_by(
+                owner_id=current_user.id,
+                shared_with=user.id
+            ).count()
+            
+            user_data['shared_records_count'] = shared_count
+            result_with_counts.append((user_data, shared_count))
+        
+        # 手动按共享记录数排序（降序）
+        result_with_counts.sort(key=lambda x: x[1], reverse=True)
+        result = [item[0] for item in result_with_counts]
+        
+        # 角色统计
+        role_counts = db.session.query(
+            User.role, func.count().label('count')
+        ).filter(
+            User.id != current_user.id,
+            User.is_active == True,
+            User.role != Role.ADMIN
+        ).group_by(User.role).all()
+        
+        role_stats = {r.value: c for r, c in role_counts}
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'users': result,
+                'role_stats': role_stats,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'page': page,
+                    'per_page': per_page,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取可共享用户列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取可共享用户列表失败: {str(e)}'
+        }), 500
+
+# 获取用户详情（用于共享记录前查看）
+@health_bp.route('/share/users/<int:user_id>', methods=['GET'])
+@login_required
+def get_sharable_user_detail(user_id):
+    """获取特定用户的详细信息，用于共享记录前的确认"""
+    try:
+        user = User.query.get_or_404(user_id)
+        
+        # 不能查询自己的详情用于共享
+        if user.id == current_user.id:
+            return jsonify({
+                'success': False,
+                'message': '不能与自己共享记录'
+            }), 400
+            
+        # 不能共享给管理员
+        if user.role == Role.ADMIN:
+            return jsonify({
+                'success': False,
+                'message': '不能与管理员共享记录'
+            }), 400
+        
+        # 构建基本用户信息
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'full_name': user.full_name,
+            'email': user.email,
+            'avatar': user.avatar,
+            'role': user.role.value,
+            'created_at': user.created_at.isoformat() if user.created_at else None
+        }
+        
+        # 添加角色特定信息
+        if user.role == Role.DOCTOR and user.doctor_info:
+            user_data['doctor_info'] = {
+                'specialty': user.doctor_info.specialty,
+                'hospital': user.doctor_info.hospital,
+                'department': user.doctor_info.department,
+                'years_of_experience': user.doctor_info.years_of_experience,
+                'bio': user.doctor_info.bio
+            }
+        elif user.role == Role.PATIENT and user.patient_info:
+            user_data['patient_info'] = {
+                'gender': user.patient_info.gender,
+                'address': user.patient_info.address
+            }
+        
+        # 获取已共享记录
+        shared_records_query = SharedRecord.query.filter_by(
+            owner_id=current_user.id,
+            shared_with=user.id
+        ).order_by(SharedRecord.created_at.desc())
+        
+        shared_records = []
+        for shared in shared_records_query.limit(5).all():  # 只显示最近5条
+            record = HealthRecord.query.get(shared.record_id)
+            if record:
+                shared_records.append({
+                    'share_id': shared.id,
+                    'record_id': record.mongo_id,
+                    'title': record.title,
+                    'record_type': record.record_type.value,
+                    'permission': shared.permission.value,
+                    'created_at': shared.created_at.isoformat() if shared.created_at else None
+                })
+        
+        user_data['shared_records'] = shared_records
+        user_data['shared_records_count'] = shared_records_query.count()
+        
+        return jsonify({
+            'success': True,
+            'data': user_data
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取用户详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取用户详情失败: {str(e)}'
+        }), 500
+
+# 通过访问密钥直接获取共享记录
+@health_bp.route('/shared/access/<access_key>', methods=['GET'])
+def access_shared_record_by_key(access_key):
+    try:
+        # 根据access_key查找共享记录
+        shared_record = SharedRecord.query.filter_by(access_key=access_key).first()
+        if not shared_record:
+            return jsonify({
+                'success': False,
+                'message': '无效的访问密钥或共享记录已不存在'
+            }), 404
+            
+        # 检查是否过期
+        if not shared_record.is_valid():
+            return jsonify({
+                'success': False,
+                'message': '共享已过期'
+            }), 403
+        
+        # 记录访问情况
+        shared_record.record_access()
+            
+        # 获取健康记录
+        health_record = shared_record.health_record
+        if not health_record:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在'
+            }), 404
+        
+        # 使用缓存函数获取MongoDB中的记录
+        mongo_id = health_record.mongo_id
+        record_data = get_mongo_health_record(mongo_id) if mongo_id else None
+        
+        if not record_data:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在或已被删除'
+            }), 404
+            
+        # 获取用户信息
+        owner = User.query.get(shared_record.owner_id)
+        shared_with_user = User.query.get(shared_record.shared_with)
+        
+        result = {
+            'shared_info': {
+                'id': shared_record.id,
+                'permission': shared_record.permission.value,
+                'created_at': shared_record.created_at.isoformat() if shared_record.created_at else None,
+                'expires_at': shared_record.expires_at.isoformat() if shared_record.expires_at else None,
+                'is_valid': shared_record.is_valid(),
+                'access_count': shared_record.access_count,
+                'last_accessed': shared_record.last_accessed.isoformat() if shared_record.last_accessed else None,
+                'owner': {
+                    'id': owner.id if owner else None,
+                    'username': owner.username if owner else None,
+                    'full_name': owner.full_name if owner else None
+                },
+                'shared_with': {
+                    'id': shared_with_user.id if shared_with_user else None,
+                    'username': shared_with_user.username if shared_with_user else None,
+                    'full_name': shared_with_user.full_name if shared_with_user else None
+                }
+            },
+            'record': record_data,
+            'sql_id': health_record.id
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"通过访问密钥获取共享记录失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取共享记录失败: {str(e)}'
         }), 500

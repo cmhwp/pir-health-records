@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
-from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo
+from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo, Institution, CustomRecordType
 from ..routers.auth import role_required, api_login_required
 from sqlalchemy import or_, and_
 import os
@@ -169,38 +169,44 @@ def create_user():
         db.session.flush()  # 获取用户ID
         
         # 根据角色创建相应的附加信息
-        if user.role == Role.PATIENT and 'patient_info' in data:
+        if user.role == Role.PATIENT:
             patient_info = PatientInfo(user_id=user.id)
-            patient_data = data['patient_info']
+            if 'patient_info' in data:
+                patient_data = data['patient_info']
+                
+                for field in ['gender', 'address', 'emergency_contact', 'emergency_phone', 
+                             'medical_history', 'allergies']:
+                    if field in patient_data:
+                        setattr(patient_info, field, patient_data[field])
             
-            for field in ['gender', 'address', 'emergency_contact', 'emergency_phone', 
-                         'medical_history', 'allergies']:
-                if field in patient_data:
-                    setattr(patient_info, field, patient_data[field])
-                    
             db.session.add(patient_info)
+            current_app.logger.info(f"为用户 {user.username} 创建了患者信息记录")
         
-        elif user.role == Role.DOCTOR and 'doctor_info' in data:
+        elif user.role == Role.DOCTOR:
             doctor_info = DoctorInfo(user_id=user.id)
-            doctor_data = data['doctor_info']
+            if 'doctor_info' in data:
+                doctor_data = data['doctor_info']
+                
+                for field in ['specialty', 'license_number', 'years_of_experience', 'education',
+                             'hospital', 'department', 'bio']:
+                    if field in doctor_data:
+                        setattr(doctor_info, field, doctor_data[field])
             
-            for field in ['specialty', 'license_number', 'years_of_experience', 'education',
-                         'hospital', 'department', 'bio']:
-                if field in doctor_data:
-                    setattr(doctor_info, field, doctor_data[field])
-                    
             db.session.add(doctor_info)
+            current_app.logger.info(f"为用户 {user.username} 创建了医生信息记录")
         
-        elif user.role == Role.RESEARCHER and 'researcher_info' in data:
+        elif user.role == Role.RESEARCHER:
             researcher_info = ResearcherInfo(user_id=user.id)
-            researcher_data = data['researcher_info']
+            if 'researcher_info' in data:
+                researcher_data = data['researcher_info']
+                
+                for field in ['institution', 'department', 'research_area', 'education',
+                             'publications', 'projects', 'bio']:
+                    if field in researcher_data:
+                        setattr(researcher_info, field, researcher_data[field])
             
-            for field in ['institution', 'department', 'research_area', 'education',
-                         'publications', 'projects', 'bio']:
-                if field in researcher_data:
-                    setattr(researcher_info, field, researcher_data[field])
-                    
             db.session.add(researcher_info)
+            current_app.logger.info(f"为用户 {user.username} 创建了研究人员信息记录")
         
         db.session.commit()
         
@@ -282,31 +288,185 @@ def update_user(user_id):
     if 'role' in data:
         role_str = data['role'].lower()
         old_role = user.role
+        new_role = None
         
         if role_str == 'doctor':
-            user.role = Role.DOCTOR
+            new_role = Role.DOCTOR
         elif role_str == 'researcher':
-            user.role = Role.RESEARCHER
+            new_role = Role.RESEARCHER
         elif role_str == 'admin':
-            user.role = Role.ADMIN
+            new_role = Role.ADMIN
         else:
-            user.role = Role.PATIENT
+            new_role = Role.PATIENT
         
-        # 如果角色发生变化，创建相应的附加信息
-        if old_role != user.role:
-            if user.role == Role.PATIENT and not user.patient_info:
+        # 如果角色发生变化，处理相关角色信息表
+        if old_role != new_role:
+            current_app.logger.info(f"用户 {user.username} 角色从 {old_role.value} 更改为 {new_role.value}")
+            
+            # 记录角色相关数据的处理
+            data_handling_info = {}
+            
+            # 检查是否要保留原有角色数据
+            transfer_data = data.get('transfer_role_data', False)
+            
+            # 专门处理从PATIENT到DOCTOR的角色转换，可复用患者病史等信息
+            if transfer_data and old_role == Role.PATIENT and new_role == Role.DOCTOR and user.patient_info:
+                # 如果是从患者转为医生且选择了迁移数据，可以保留一些基本信息
+                patient_data = {
+                    'gender': user.patient_info.gender,
+                    'date_of_birth': user.patient_info.date_of_birth,
+                    'address': user.patient_info.address,
+                    'emergency_contact': user.patient_info.emergency_contact,
+                    'emergency_phone': user.patient_info.emergency_phone,
+                }
+                data_handling_info['patient_to_doctor'] = {
+                    'action': 'transferred_basic_info',
+                    'transferred_fields': list(patient_data.keys())
+                }
+                
+                # 创建或更新医生信息，同时转移一些基本个人信息
+                doctor_info = user.doctor_info or DoctorInfo(user_id=user.id)
+                # 可以转移的基本信息
+                if 'doctor_info' not in data:
+                    data['doctor_info'] = {}
+                
+                # 确保不覆盖已提供的字段
+                doctor_data = data['doctor_info']
+                current_app.logger.info(f"转移患者基本信息到医生信息")
+            
+            # 存储/删除旧角色数据
+            if old_role == Role.PATIENT:
+                if user.patient_info:
+                    # 是否保留患者数据
+                    keep_data = data.get('keep_patient_data', False)
+                    if not keep_data:
+                        data_handling_info['patient_info'] = {
+                            'action': 'deleted',
+                            'data_summary': user.patient_info.to_dict()
+                        }
+                        db.session.delete(user.patient_info)
+                        current_app.logger.info(f"已删除用户 {user.username} 的患者信息记录")
+                    else:
+                        data_handling_info['patient_info'] = {'action': 'preserved'}
+                        current_app.logger.info(f"已保留用户 {user.username} 的患者信息记录")
+            
+            elif old_role == Role.DOCTOR:
+                if user.doctor_info:
+                    keep_data = data.get('keep_doctor_data', False)
+                    if not keep_data:
+                        data_handling_info['doctor_info'] = {
+                            'action': 'deleted',
+                            'data_summary': user.doctor_info.to_dict()
+                        }
+                        db.session.delete(user.doctor_info)
+                        current_app.logger.info(f"已删除用户 {user.username} 的医生信息记录")
+                    else:
+                        data_handling_info['doctor_info'] = {'action': 'preserved'}
+                        current_app.logger.info(f"已保留用户 {user.username} 的医生信息记录")
+            
+            elif old_role == Role.RESEARCHER:
+                if user.researcher_info:
+                    keep_data = data.get('keep_researcher_data', False)
+                    if not keep_data:
+                        data_handling_info['researcher_info'] = {
+                            'action': 'deleted',
+                            'data_summary': user.researcher_info.to_dict()
+                        }
+                        db.session.delete(user.researcher_info)
+                        current_app.logger.info(f"已删除用户 {user.username} 的研究人员信息记录")
+                    else:
+                        data_handling_info['researcher_info'] = {'action': 'preserved'}
+                        current_app.logger.info(f"已保留用户 {user.username} 的研究人员信息记录")
+            
+            # 设置新角色
+            user.role = new_role
+            
+            # 确保新角色有对应的信息记录
+            if new_role == Role.PATIENT and not user.patient_info:
                 patient_info = PatientInfo(user_id=user.id)
                 db.session.add(patient_info)
+                current_app.logger.info(f"为用户 {user.username} 创建了患者信息记录")
+                data_handling_info['new_patient_info'] = {'action': 'created'}
                 
-            elif user.role == Role.DOCTOR and not user.doctor_info:
+                # 如果提供了患者信息，立即更新
+                if 'patient_info' in data:
+                    patient_data = data['patient_info']
+                    for field in ['gender', 'address', 'emergency_contact', 'emergency_phone', 
+                                'medical_history', 'allergies']:
+                        if field in patient_data:
+                            setattr(patient_info, field, patient_data[field])
+                    
+                    # 处理日期字段
+                    if 'date_of_birth' in patient_data:
+                        try:
+                            date_value = patient_data['date_of_birth']
+                            if date_value:
+                                patient_info.date_of_birth = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+                            else:
+                                patient_info.date_of_birth = None
+                        except (ValueError, TypeError) as e:
+                            current_app.logger.error(f"解析出生日期失败: {str(e)}")
+                
+            elif new_role == Role.DOCTOR and not user.doctor_info:
                 doctor_info = DoctorInfo(user_id=user.id)
                 db.session.add(doctor_info)
+                current_app.logger.info(f"为用户 {user.username} 创建了医生信息记录")
+                data_handling_info['new_doctor_info'] = {'action': 'created'}
                 
-            elif user.role == Role.RESEARCHER and not user.researcher_info:
+                # 如果提供了医生信息，立即更新
+                if 'doctor_info' in data:
+                    doctor_data = data['doctor_info']
+                    for field in ['specialty', 'license_number', 'years_of_experience', 'education',
+                                'hospital', 'department', 'bio']:
+                        if field in doctor_data:
+                            setattr(doctor_info, field, doctor_data[field])
+                
+            elif new_role == Role.RESEARCHER and not user.researcher_info:
                 researcher_info = ResearcherInfo(user_id=user.id)
                 db.session.add(researcher_info)
+                current_app.logger.info(f"为用户 {user.username} 创建了研究人员信息记录")
+                data_handling_info['new_researcher_info'] = {'action': 'created'}
+                
+                # 如果提供了研究人员信息，立即更新
+                if 'researcher_info' in data:
+                    researcher_data = data['researcher_info']
+                    for field in ['institution', 'department', 'research_area', 'education',
+                                'publications', 'projects', 'bio']:
+                        if field in researcher_data:
+                            setattr(researcher_info, field, researcher_data[field])
+            
+            # 记录角色变更
+            log_admin(
+                message=f'管理员更改了用户 {user.username} 的角色: 从 {old_role.value} 变更为 {new_role.value}',
+                details={
+                    'user_id': user.id,
+                    'username': user.username,
+                    'old_role': old_role.value,
+                    'new_role': new_role.value,
+                    'data_handling': data_handling_info,
+                    'admin_username': current_user.username,
+                    'time': datetime.now().isoformat()
+                }
+            )
+            
+            # 提示信息
+            role_change_message = f"用户角色已从 {old_role.value} 更改为 {new_role.value}，已创建相应的角色信息记录。"
+            
+            # 如果选择保留原角色数据，添加提示
+            if data.get(f'keep_{old_role.value.lower()}_data', False):
+                role_change_message += f" 已保留原 {old_role.value} 角色的数据。"
+            else:
+                role_change_message += f" 原 {old_role.value} 角色的数据已被清除。"
+                
+            # 如果进行了数据迁移，添加提示
+            if transfer_data and old_role == Role.PATIENT and new_role == Role.DOCTOR:
+                role_change_message += " 部分基本个人信息已从患者资料迁移至医生资料。"
+        else:
+            role_change_message = ""
+    else:
+        role_change_message = ""
     
-    # 更新角色特定信息
+    # 更新角色特定信息（对于未发生角色变更的情况或保留了原角色数据的情况）
     if user.role == Role.PATIENT and 'patient_info' in data:
         patient_info = user.patient_info or PatientInfo(user_id=user.id)
         patient_data = data['patient_info']
@@ -315,6 +475,17 @@ def update_user(user_id):
                      'medical_history', 'allergies']:
             if field in patient_data:
                 setattr(patient_info, field, patient_data[field])
+        
+        # 处理日期字段
+        if 'date_of_birth' in patient_data:
+            try:
+                date_value = patient_data['date_of_birth']
+                if date_value:
+                    patient_info.date_of_birth = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+                else:
+                    patient_info.date_of_birth = None
+            except (ValueError, TypeError) as e:
+                current_app.logger.error(f"解析出生日期失败: {str(e)}")
         
         if patient_info.id is None:
             db.session.add(patient_info)
@@ -368,9 +539,13 @@ def update_user(user_id):
             })
         )
         
+        success_message = '用户信息已更新'
+        if role_change_message:
+            success_message += f" {role_change_message}"
+            
         return jsonify({
             'success': True,
-            'message': '用户信息已更新',
+            'message': success_message,
             'data': user.to_dict()
         })
     except Exception as e:
@@ -1828,3 +2003,348 @@ def process_batch_job(batch_job_id):
                 batch_job.mark_failed()
         except:
             pass
+
+# 添加这些路由到合适的位置
+@admin_bp.route('/institutions', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_institutions():
+    """获取所有医疗机构列表"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        search = request.args.get('search', '')
+        
+        # 构建查询
+        query = Institution.query
+        
+        # 应用搜索过滤
+        if search:
+            query = query.filter(Institution.name.contains(search) | 
+                                 Institution.code.contains(search) | 
+                                 Institution.address.contains(search))
+        
+        # 获取分页结果
+        pagination = query.order_by(Institution.id.desc()).paginate(page=page, per_page=per_page)
+        institutions = pagination.items
+        
+        # 格式化响应
+        result = {
+            'institutions': [inst.to_dict() for inst in institutions],
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'pages': pagination.pages,
+        }
+        
+        return jsonify({'success': True, 'data': result})
+    except Exception as e:
+        current_app.logger.error(f"获取医疗机构列表出错: {str(e)}")
+        return jsonify({'success': False, 'message': '获取医疗机构列表失败'}), 500
+
+@admin_bp.route('/institutions/<int:institution_id>', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_institution(institution_id):
+    """获取单个医疗机构详情"""
+    try:
+        institution = Institution.query.get(institution_id)
+        if not institution:
+            return jsonify({'success': False, 'message': '医疗机构不存在'}), 404
+            
+        return jsonify({'success': True, 'data': institution.to_dict()})
+    except Exception as e:
+        current_app.logger.error(f"获取医疗机构详情出错: {str(e)}")
+        return jsonify({'success': False, 'message': '获取医疗机构详情失败'}), 500
+
+@admin_bp.route('/institutions', methods=['POST'])
+@api_login_required
+@role_required(Role.ADMIN)
+def create_institution():
+    """创建新医疗机构"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'message': '请求数据无效'}), 400
+            
+        # 验证必填字段
+        if not data.get('name'):
+            return jsonify({'success': False, 'message': '机构名称不能为空'}), 400
+            
+        # 检查名称是否已存在
+        existing = Institution.query.filter_by(name=data.get('name')).first()
+        if existing:
+            return jsonify({'success': False, 'message': '该机构名称已存在'}), 400
+            
+        # 创建新机构
+        institution = Institution(
+            name=data.get('name'),
+            code=data.get('code'),
+            address=data.get('address'),
+            phone=data.get('phone'),
+            email=data.get('email'),
+            website=data.get('website'),
+            description=data.get('description'),
+            logo_url=data.get('logo_url'),
+            is_active=data.get('is_active', True)
+        )
+        
+        db.session.add(institution)
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员创建了新的医疗机构: {institution.name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"医疗机构ID: {institution.id}")
+        
+        return jsonify({'success': True, 'data': institution.to_dict(), 'message': '医疗机构创建成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"创建医疗机构出错: {str(e)}")
+        return jsonify({'success': False, 'message': '创建医疗机构失败'}), 500
+
+@admin_bp.route('/institutions/<int:institution_id>', methods=['PUT'])
+@api_login_required
+@role_required(Role.ADMIN)
+def update_institution(institution_id):
+    """更新医疗机构信息"""
+    try:
+        institution = Institution.query.get(institution_id)
+        if not institution:
+            return jsonify({'success': False, 'message': '医疗机构不存在'}), 404
+            
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'message': '请求数据无效'}), 400
+            
+        # 检查名称是否已存在（如果要修改名称）
+        if data.get('name') and data.get('name') != institution.name:
+            existing = Institution.query.filter_by(name=data.get('name')).first()
+            if existing:
+                return jsonify({'success': False, 'message': '该机构名称已存在'}), 400
+        
+        # 更新字段
+        if data.get('name'):
+            institution.name = data.get('name')
+        if 'code' in data:
+            institution.code = data.get('code')
+        if 'address' in data:
+            institution.address = data.get('address')
+        if 'phone' in data:
+            institution.phone = data.get('phone')
+        if 'email' in data:
+            institution.email = data.get('email')
+        if 'website' in data:
+            institution.website = data.get('website')
+        if 'description' in data:
+            institution.description = data.get('description')
+        if 'logo_url' in data:
+            institution.logo_url = data.get('logo_url')
+        if 'is_active' in data:
+            institution.is_active = data.get('is_active')
+            
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员更新了医疗机构信息: {institution.name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"医疗机构ID: {institution.id}")
+        
+        return jsonify({'success': True, 'data': institution.to_dict(), 'message': '医疗机构更新成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"更新医疗机构出错: {str(e)}")
+        return jsonify({'success': False, 'message': '更新医疗机构失败'}), 500
+
+@admin_bp.route('/institutions/<int:institution_id>', methods=['DELETE'])
+@api_login_required
+@role_required(Role.ADMIN)
+def delete_institution(institution_id):
+    """删除医疗机构"""
+    try:
+        institution = Institution.query.get(institution_id)
+        if not institution:
+            return jsonify({'success': False, 'message': '医疗机构不存在'}), 404
+            
+        # 记录操作信息用于日志
+        institution_name = institution.name
+        
+        # 删除机构
+        db.session.delete(institution)
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员删除了医疗机构: {institution_name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"医疗机构ID: {institution_id}")
+        
+        return jsonify({'success': True, 'message': '医疗机构删除成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"删除医疗机构出错: {str(e)}")
+        return jsonify({'success': False, 'message': '删除医疗机构失败'}), 500
+
+# 记录类型管理API
+@admin_bp.route('/record-types', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_record_types():
+    """获取所有记录类型列表"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        search = request.args.get('search', '')
+        
+        # 构建查询
+        query = CustomRecordType.query
+        
+        # 应用搜索过滤
+        if search:
+            query = query.filter(CustomRecordType.name.contains(search) | 
+                                 CustomRecordType.code.contains(search) | 
+                                 CustomRecordType.description.contains(search))
+        
+        # 获取分页结果
+        pagination = query.order_by(CustomRecordType.id.desc()).paginate(page=page, per_page=per_page)
+        record_types = pagination.items
+        
+        # 格式化响应
+        result = {
+            'record_types': [rt.to_dict() for rt in record_types],
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'pages': pagination.pages,
+        }
+        
+        return jsonify({'success': True, 'data': result})
+    except Exception as e:
+        current_app.logger.error(f"获取记录类型列表出错: {str(e)}")
+        return jsonify({'success': False, 'message': '获取记录类型列表失败'}), 500
+
+@admin_bp.route('/record-types/<int:type_id>', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_record_type(type_id):
+    """获取单个记录类型详情"""
+    try:
+        record_type = CustomRecordType.query.get(type_id)
+        if not record_type:
+            return jsonify({'success': False, 'message': '记录类型不存在'}), 404
+            
+        return jsonify({'success': True, 'data': record_type.to_dict()})
+    except Exception as e:
+        current_app.logger.error(f"获取记录类型详情出错: {str(e)}")
+        return jsonify({'success': False, 'message': '获取记录类型详情失败'}), 500
+
+@admin_bp.route('/record-types', methods=['POST'])
+@api_login_required
+@role_required(Role.ADMIN)
+def create_record_type():
+    """创建新记录类型"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'message': '请求数据无效'}), 400
+            
+        # 验证必填字段
+        if not data.get('name') or not data.get('code'):
+            return jsonify({'success': False, 'message': '类型名称和代码不能为空'}), 400
+            
+        # 检查代码是否已存在
+        existing = CustomRecordType.query.filter_by(code=data.get('code')).first()
+        if existing:
+            return jsonify({'success': False, 'message': '该类型代码已存在'}), 400
+            
+        # 创建新记录类型
+        record_type = CustomRecordType(
+            name=data.get('name'),
+            code=data.get('code'),
+            description=data.get('description'),
+            color=data.get('color'),
+            icon=data.get('icon'),
+            is_active=data.get('is_active', True)
+        )
+        
+        db.session.add(record_type)
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员创建了新的记录类型: {record_type.name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"记录类型ID: {record_type.id}")
+        
+        return jsonify({'success': True, 'data': record_type.to_dict(), 'message': '记录类型创建成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"创建记录类型出错: {str(e)}")
+        return jsonify({'success': False, 'message': '创建记录类型失败'}), 500
+
+@admin_bp.route('/record-types/<int:type_id>', methods=['PUT'])
+@api_login_required
+@role_required(Role.ADMIN)
+def update_record_type(type_id):
+    """更新记录类型信息"""
+    try:
+        record_type = CustomRecordType.query.get(type_id)
+        if not record_type:
+            return jsonify({'success': False, 'message': '记录类型不存在'}), 404
+            
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'message': '请求数据无效'}), 400
+            
+        # 检查代码是否已存在（如果要修改代码）
+        if data.get('code') and data.get('code') != record_type.code:
+            existing = CustomRecordType.query.filter_by(code=data.get('code')).first()
+            if existing:
+                return jsonify({'success': False, 'message': '该类型代码已存在'}), 400
+        
+        # 更新字段
+        if data.get('name'):
+            record_type.name = data.get('name')
+        if data.get('code'):
+            record_type.code = data.get('code')
+        if 'description' in data:
+            record_type.description = data.get('description')
+        if 'color' in data:
+            record_type.color = data.get('color')
+        if 'icon' in data:
+            record_type.icon = data.get('icon')
+        if 'is_active' in data:
+            record_type.is_active = data.get('is_active')
+            
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员更新了记录类型信息: {record_type.name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"记录类型ID: {record_type.id}")
+        
+        return jsonify({'success': True, 'data': record_type.to_dict(), 'message': '记录类型更新成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"更新记录类型出错: {str(e)}")
+        return jsonify({'success': False, 'message': '更新记录类型失败'}), 500
+
+@admin_bp.route('/record-types/<int:type_id>', methods=['DELETE'])
+@api_login_required
+@role_required(Role.ADMIN)
+def delete_record_type(type_id):
+    """删除记录类型"""
+    try:
+        record_type = CustomRecordType.query.get(type_id)
+        if not record_type:
+            return jsonify({'success': False, 'message': '记录类型不存在'}), 404
+            
+        # 记录操作信息用于日志
+        type_name = record_type.name
+        
+        # 删除记录类型
+        db.session.delete(record_type)
+        db.session.commit()
+        
+        # 记录操作日志
+        log_message = f"管理员删除了记录类型: {type_name}"
+        add_system_log(LogType.ADMIN, log_message, details=f"记录类型ID: {type_id}")
+        
+        return jsonify({'success': True, 'message': '记录类型删除成功'})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"删除记录类型出错: {str(e)}")
+        return jsonify({'success': False, 'message': '删除记录类型失败'}), 500
