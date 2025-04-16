@@ -69,6 +69,7 @@ class LogType(Enum):
     EXPORT = 'export'              # 数据导出日志（导出、下载等）
     IMPORT = 'import'              # 数据导入日志（导入、上传等）
     AUDIT = 'audit'                # 审计日志（敏感操作、合规检查等）
+    RESEARCH = 'research'          # 研究相关日志（研究员查询、导出等）
     
     def __str__(self):
         return self.value

@@ -172,4 +172,13 @@ def log_audit(message, details=None, user_id=None):
         message=message,
         details=details,
         user_id=user_id
+    )
+
+def log_research(message, details=None, user_id=None):
+    """记录研究相关日志"""
+    return log_activity(
+        log_type=LogType.RESEARCH,
+        message=message,
+        details=details,
+        user_id=user_id
     ) 

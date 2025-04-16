@@ -21,6 +21,7 @@ from .log import SystemLog, LogType
 from .cache_item import CacheItem
 from .batch_jobs import BatchJob, BatchJobLog, BatchJobError
 from .prescription import Prescription, PrescriptionStatus, PrescriptionItem
+from .researcher import ResearchProject, ProjectTeamMember, ProjectStatus
 
 @login_manager.user_loader
 def load_user(user_id):

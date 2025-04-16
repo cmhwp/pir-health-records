@@ -3970,7 +3970,7 @@ def get_record_types():
         }), 200
     
     except Exception as e:
-        app.logger.error(f"获取记录类型失败: {str(e)}")
+        current_app.logger.error(f"获取记录类型失败: {str(e)}")
         return jsonify({
             'success': False,
             'message': '获取记录类型失败',
