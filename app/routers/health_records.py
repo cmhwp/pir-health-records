@@ -25,11 +25,35 @@ import math
 import secrets
 import random
 from ..utils.log_utils import log_record
+from app.models.institution import Institution, CustomRecordType
 
 def check_record_access_permission(record, user):
     """检查用户是否有权限访问此记录"""
-    # 检查访问权限
-    if str(record['patient_id']) != str(user.id) and record['visibility'] == 'private':
+    # 记录访问尝试日志
+    try:
+        from ..utils.log_utils import log_record
+        log_record(
+            message=f'用户尝试访问健康记录',
+            details={
+                'user_id': user.id,
+                'record_id': str(record.get('_id', 'unknown')),
+                'record_title': record.get('title', 'unknown'),
+                'record_visibility': record.get('visibility', 'unknown')
+            }
+        )
+    except Exception as e:
+        current_app.logger.error(f"记录访问日志失败: {str(e)}")
+    
+    # 管理员可以访问所有记录
+    if user.has_role(Role.ADMIN):
+        return True, None
+        
+    # 记录所有者可以访问自己的所有记录
+    if str(record['patient_id']) == str(user.id):
+        return True, None
+        
+    # 检查可见性访问权限
+    if record['visibility'] == 'private':
         return False, '没有权限访问此记录'
         
     if record['visibility'] == 'doctor' and not user.has_role(Role.DOCTOR):
@@ -38,6 +62,7 @@ def check_record_access_permission(record, user):
     if record['visibility'] == 'researcher' and not user.has_role(Role.RESEARCHER):
         return False, '没有权限访问此记录'
         
+    # 通过所有检查，授予访问权限
     return True, None
 
 health_bp = Blueprint('health', __name__, url_prefix='/api/health')
@@ -3925,4 +3950,29 @@ def access_shared_record_by_key(access_key):
         return jsonify({
             'success': False,
             'message': f'获取共享记录失败: {str(e)}'
+        }), 500
+
+@health_bp.route('/record-types', methods=['GET'])
+def get_record_types():
+    """获取所有记录类型"""
+    try:
+        # 获取所有启用的记录类型
+        record_types = CustomRecordType.query.filter_by(is_active=True).all()
+        
+        # 转换为字典列表
+        record_types_data = [record_type.to_dict() for record_type in record_types]
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'record_types': record_types_data
+            }
+        }), 200
+    
+    except Exception as e:
+        app.logger.error(f"获取记录类型失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': '获取记录类型失败',
+            'error': str(e)
         }), 500

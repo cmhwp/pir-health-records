@@ -152,6 +152,13 @@ def create_record_types():
     
     record_types = [
         {
+            'code': 'GENERAL_CHECKUP',
+            'name': '常规检查',
+            'description': '常规检查结果',
+            'color': '#1890ff',
+            'icon': '🏥'
+        },
+        {
             'code': 'LAB_RESULT',
             'name': '检验报告',
             'description': '各类临床检验结果，包括血常规、尿常规、生化检查等',

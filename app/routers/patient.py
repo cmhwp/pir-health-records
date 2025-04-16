@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import json
 from sqlalchemy import func, distinct
 from ..models.notification import Notification, NotificationType
+from ..models.institution import Institution, CustomRecordType
 
 # 创建蓝图
 patient_bp = Blueprint('patient', __name__, url_prefix='/api/patient')
@@ -498,3 +499,337 @@ def get_prescriptions_by_doctor(doctor_id):
             'success': False,
             'message': f'获取医生处方历史失败: {str(e)}'
         }), 500
+
+# 获取医疗机构列表
+@patient_bp.route('/institutions', methods=['GET'])
+@login_required
+@role_required(Role.PATIENT)
+def get_institutions():
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        search = request.args.get('search', '')
+        
+        # 构建查询
+        query = Institution.query.filter_by(is_active=True)
+        
+        # 应用搜索过滤
+        if search:
+            query = query.filter(Institution.name.contains(search) | 
+                                Institution.code.contains(search) | 
+                                Institution.address.contains(search))
+        
+        # 获取分页结果
+        pagination = query.order_by(Institution.name).paginate(page=page, per_page=per_page, error_out=False)
+        institutions = pagination.items
+        
+        # 格式化响应
+        result = [inst.to_dict() for inst in institutions]
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'institutions': result,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'page': page,
+                    'per_page': per_page,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取医疗机构列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取医疗机构列表失败: {str(e)}'
+        }), 500
+
+# 获取单个医疗机构详情
+@patient_bp.route('/institutions/<int:institution_id>', methods=['GET'])
+@login_required
+@role_required(Role.PATIENT)
+def get_institution(institution_id):
+    try:
+        institution = Institution.query.get(institution_id)
+        if not institution:
+            return jsonify({
+                'success': False,
+                'message': '医疗机构不存在'
+            }), 404
+            
+        if not institution.is_active:
+            return jsonify({
+                'success': False,
+                'message': '该医疗机构已停用'
+            }), 403
+            
+        return jsonify({
+            'success': True,
+            'data': institution.to_dict()
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取医疗机构详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取医疗机构详情失败: {str(e)}'
+        }), 500
+
+# 获取指定医疗机构的医生列表
+@patient_bp.route('/institutions/<int:institution_id>/doctors', methods=['GET'])
+@login_required
+@role_required(Role.PATIENT)
+def get_institution_doctors(institution_id):
+    try:
+        # 确认机构存在且激活
+        institution = Institution.query.get(institution_id)
+        if not institution:
+            return jsonify({
+                'success': False,
+                'message': '医疗机构不存在'
+            }), 404
+            
+        if not institution.is_active:
+            return jsonify({
+                'success': False,
+                'message': '该医疗机构已停用'
+            }), 403
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        
+        # 搜索条件
+        search_term = request.args.get('search', '')
+        department = request.args.get('department', '')
+        specialty = request.args.get('specialty', '')
+        
+        # 构建查询 - 筛选指定机构的医生
+        query = User.query.join(DoctorInfo, User.id == DoctorInfo.user_id).filter(
+            User.role == Role.DOCTOR,
+            DoctorInfo.institution_id == institution_id
+        )
+        
+        # 应用搜索条件
+        if search_term:
+            query = query.filter(User.full_name.like(f'%{search_term}%') | User.username.like(f'%{search_term}%'))
+            
+        if department:
+            query = query.filter(DoctorInfo.department.like(f'%{department}%'))
+            
+        if specialty:
+            query = query.filter(DoctorInfo.specialty.like(f'%{specialty}%'))
+        
+        # 排序
+        sort_by = request.args.get('sort_by', 'name')
+        sort_order = request.args.get('sort_order', 'asc')
+        
+        if sort_by == 'name':
+            if sort_order == 'desc':
+                query = query.order_by(User.full_name.desc())
+            else:
+                query = query.order_by(User.full_name.asc())
+        elif sort_by == 'experience':
+            if sort_order == 'desc':
+                query = query.order_by(DoctorInfo.years_of_experience.desc())
+            else:
+                query = query.order_by(DoctorInfo.years_of_experience.asc())
+        else:
+            if sort_order == 'desc':
+                query = query.order_by(User.created_at.desc())
+            else:
+                query = query.order_by(User.created_at.asc())
+        
+        # 分页
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        doctors = pagination.items
+        
+        # 处理结果
+        result = []
+        for doctor in doctors:
+            doctor_data = {
+                'id': doctor.id,
+                'username': doctor.username,
+                'full_name': doctor.full_name,
+                'avatar': doctor.avatar
+            }
+            
+            # 添加医生专业信息
+            if doctor.doctor_info:
+                doctor_data['info'] = {
+                    'specialty': doctor.doctor_info.specialty,
+                    'department': doctor.doctor_info.department,
+                    'years_of_experience': doctor.doctor_info.years_of_experience,
+                    'bio': doctor.doctor_info.bio
+                }
+                
+            # 查询患者与该医生的记录历史
+            record_count = HealthRecord.query.filter_by(
+                patient_id=current_user.id,
+                doctor_id=doctor.id
+            ).count()
+            
+            doctor_data['interaction'] = {
+                'record_count': record_count,
+                'has_interaction': (record_count > 0)
+            }
+            
+            result.append(doctor_data)
+        
+        # 获取机构中的部门和专科筛选选项
+        departments = db.session.query(DoctorInfo.department, func.count(DoctorInfo.id))\
+            .filter(DoctorInfo.institution_id == institution_id, DoctorInfo.department.isnot(None))\
+            .group_by(DoctorInfo.department)\
+            .all()
+            
+        specialties = db.session.query(DoctorInfo.specialty, func.count(DoctorInfo.id))\
+            .filter(DoctorInfo.institution_id == institution_id, DoctorInfo.specialty.isnot(None))\
+            .group_by(DoctorInfo.specialty)\
+            .all()
+        
+        filter_options = {
+            'departments': {d: c for d, c in departments if d},
+            'specialties': {s: c for s, c in specialties if s}
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'institution': institution.to_dict(),
+                'doctors': result,
+                'filters': filter_options,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'page': page,
+                    'per_page': per_page,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取机构医生列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取机构医生列表失败: {str(e)}'
+        }), 500
+
+# 获取记录类型列表
+@patient_bp.route('/record-types', methods=['GET'])
+@login_required
+def get_record_types():
+    try:
+        # 获取所有启用的记录类型
+        record_types = CustomRecordType.query.filter_by(is_active=True).all()
+        
+        # 转换为字典列表
+        result = [record_type.to_dict() for record_type in record_types]
+        
+        # 按名称排序
+        result.sort(key=lambda x: x['name'])
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'record_types': result
+            }
+        })
+    
+    except Exception as e:
+        current_app.logger.error(f"获取记录类型列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取记录类型列表失败: {str(e)}'
+        }), 500
+
+# 获取记录类型详情
+@patient_bp.route('/record-types/<int:type_id>', methods=['GET'])
+@login_required
+def get_record_type(type_id):
+    try:
+        record_type = CustomRecordType.query.get(type_id)
+        if not record_type:
+            return jsonify({
+                'success': False,
+                'message': '记录类型不存在'
+            }), 404
+            
+        if not record_type.is_active:
+            return jsonify({
+                'success': False,
+                'message': '该记录类型已停用'
+            }), 403
+            
+        return jsonify({
+            'success': True,
+            'data': record_type.to_dict()
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取记录类型详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取记录类型详情失败: {str(e)}'
+        }), 500
+
+# 获取系统通用代码列表
+@patient_bp.route('/system-codes', methods=['GET'])
+@login_required
+def get_system_codes():
+    """获取系统通用代码列表，包括记录类型、医疗机构等"""
+    try:
+        code_type = request.args.get('type', '')
+        
+        response = {
+            'success': True,
+            'data': {}
+        }
+        
+        # 获取记录类型
+        if not code_type or code_type == 'record_types':
+            record_types = CustomRecordType.query.filter_by(is_active=True).all()
+            response['data']['record_types'] = [rt.to_dict() for rt in record_types]
+        
+        # 获取医疗机构
+        if not code_type or code_type == 'institutions':
+            institutions = Institution.query.filter_by(is_active=True).all()
+            response['data']['institutions'] = [inst.to_dict() for inst in institutions]
+        
+        # 获取处方状态
+        if not code_type or code_type == 'prescription_statuses':
+            from ..models.prescription import PrescriptionStatus
+            response['data']['prescription_statuses'] = [
+                {'code': status.value, 'name': status.name} 
+                for status in PrescriptionStatus
+            ]
+        
+        # 获取记录可见性选项
+        if not code_type or code_type == 'record_visibilities':
+            response['data']['record_visibilities'] = [
+                {'code': visibility.value, 'name': visibility.name, 'description': get_visibility_description(visibility)} 
+                for visibility in RecordVisibility
+            ]
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        current_app.logger.error(f"获取系统代码列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取系统代码列表失败: {str(e)}'
+        }), 500
+
+def get_visibility_description(visibility):
+    """获取可见性的中文描述"""
+    descriptions = {
+        RecordVisibility.PRIVATE: "仅患者可见",
+        RecordVisibility.DOCTOR: "医生可见",
+        RecordVisibility.RESEARCHER: "研究人员可见",
+        RecordVisibility.PUBLIC: "公开"
+    }
+    return descriptions.get(visibility, "")
