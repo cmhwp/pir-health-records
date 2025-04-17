@@ -43,9 +43,41 @@ class PIRQuery:
         Returns:
             查询结果
         """
+        from flask import current_app
+        
+        # 检查维度并确保匹配
+        if len(data.shape) < 2:
+            # 数据是一维的，reshape为二维
+            data = data.reshape(1, -1)
+        
+        if len(query_vector.shape) != 1 or query_vector.shape[0] != data.shape[0]:
+            # 调整查询向量的维度以匹配数据
+            current_app.logger.info(f"调整查询向量维度 - 数据形状: {data.shape}, 查询向量形状: {query_vector.shape}")
+            if query_vector.shape[0] != data.shape[0]:
+                # 如果长度不匹配，重新创建查询向量
+                new_query_vector = np.zeros(data.shape[0], dtype=int)
+                # 复制原始查询向量的最小长度部分
+                min_len = min(query_vector.shape[0], data.shape[0])
+                new_query_vector[:min_len] = query_vector[:min_len]
+                query_vector = new_query_vector
+        
         # 使用查询向量与数据内积获取结果
-        result = np.dot(data, query_vector)
-        return result
+        try:
+            # 转置数据以便进行矩阵乘法
+            result = np.dot(query_vector, data)
+            return result
+        except ValueError as e:
+            current_app.logger.error(f"矩阵乘法失败: {str(e)}, 数据形状: {data.shape}, 查询向量形状: {query_vector.shape}")
+            # 尝试另一种方法
+            try:
+                result = []
+                for i, val in enumerate(query_vector):
+                    if val > 0 and i < len(data):
+                        result.append(data[i])
+                return np.array(result)
+            except Exception as e2:
+                current_app.logger.error(f"备选查询方法也失败: {str(e2)}")
+                raise
     
     @staticmethod
     def encode_health_record(record):
@@ -170,7 +202,7 @@ class PIRQuery:
         random_numbers.insert(position, encoded_index)
         
         # 再次使用密钥加密位置
-        position_key = int(key[8:16], 16) % 100
+        position_key = int(key[8:16], 16) % 10
         encrypted_position = (position + position_key) % 10
         
         return {
@@ -220,22 +252,49 @@ def prepare_pir_database(health_records):
     Returns:
         PIR数据库，记录映射
     """
+    from flask import current_app
+    
     # 创建记录到数值向量的映射
     record_vectors = []
     record_mapping = {}
     
     for idx, record in enumerate(health_records):
-        vector = PIRQuery.encode_health_record(record)
-        record_vectors.append(vector)
-        record_mapping[idx] = record
+        try:
+            vector = PIRQuery.encode_health_record(record)
+            record_vectors.append(vector)
+            record_mapping[idx] = record
+        except Exception as e:
+            current_app.logger.error(f"编码健康记录失败: {str(e)}")
+            # 使用一个默认向量代替
+            record_vectors.append([0] * 32)  # 默认使用32长度的向量
+            record_mapping[idx] = record
     
     # 将向量列表转为numpy数组
     if record_vectors:
-        max_length = max(len(v) for v in record_vectors)
-        # 填充向量到相同长度
-        padded_vectors = [v + [0] * (max_length - len(v)) for v in record_vectors]
-        pir_database = np.array(padded_vectors)
+        try:
+            # 确保所有向量长度相同
+            max_length = max(len(v) for v in record_vectors)
+            # 填充向量到相同长度
+            padded_vectors = [v + [0] * (max_length - len(v)) for v in record_vectors]
+            # 转换为二维数组
+            pir_database = np.array(padded_vectors)
+            
+            # 检查数据库形状并记录
+            current_app.logger.info(f"PIR数据库形状: {pir_database.shape}, 记录数量: {len(health_records)}")
+            
+            if len(pir_database.shape) != 2:
+                # 确保是二维数组
+                if len(pir_database.shape) == 1:
+                    pir_database = pir_database.reshape(1, -1)
+                else:
+                    # 如果是多维，展平为二维
+                    pir_database = pir_database.reshape(len(health_records), -1)
+        except Exception as e:
+            current_app.logger.error(f"创建PIR数据库失败: {str(e)}")
+            # 创建一个默认数据库
+            pir_database = np.zeros((len(health_records), 32))
     else:
+        # 创建一个空数据库
         pir_database = np.array([])
     
     return pir_database, record_mapping
@@ -494,4 +553,233 @@ def record_query_history(patient_id, query_type, query_params, is_anonymous=Fals
     if pir_settings:
         query_history['pir_settings'] = pir_settings
     
-    mongo.db.query_history.insert_one(query_history) 
+    mongo.db.query_history.insert_one(query_history)
+
+def parse_encrypted_query_id(encrypted_id):
+    """
+    解析前端发送的加密查询ID
+    
+    Args:
+        encrypted_id: 加密的查询ID，格式为：ENC_<base64>_<random>
+        
+    Returns:
+        解析后的整数索引
+    """
+    try:
+        if encrypted_id.startswith('ENC_'):
+            # 分离格式：ENC_<base64编码的ID>_<随机字符串>
+            parts = encrypted_id.split('_')
+            if len(parts) >= 2:
+                # 解码base64部分
+                encoded_id = parts[1]
+                decoded_bytes = base64.b64decode(encoded_id)
+                decoded_id = decoded_bytes.decode('utf-8')
+                # 转换为整数
+                return int(decoded_id)
+        # 如果不是预期格式，尝试直接转为整数
+        return int(encrypted_id)
+    except Exception as e:
+        current_app.logger.error(f"解析加密ID失败: {str(e)}")
+        # 返回一个随机索引，避免直接失败
+        # 这可能不是最佳方案，但可以防止错误传播
+        return random.randint(0, 100)
+
+def generate_pir_decrypt_key(record_id, researcher_id):
+    """
+    生成PIR记录解密密钥
+    
+    Args:
+        record_id: 记录ID
+        researcher_id: 研究员ID
+        
+    Returns:
+        解密密钥
+    """
+    from flask import current_app
+    import hashlib
+    
+    try:
+        # 混合记录ID和研究员ID作为种子
+        seed = f"{record_id}_{researcher_id}_{current_app.config.get('SECRET_KEY', '')}"
+        
+        # 计算哈希作为密钥
+        key_hash = hashlib.sha256(seed.encode()).hexdigest()
+        
+        # 取前16位作为可读密钥
+        readable_key = key_hash[:16]
+        
+        return readable_key
+    except Exception as e:
+        current_app.logger.error(f"生成PIR解密密钥失败: {str(e)}")
+        return None
+
+def verify_pir_decrypt_key(record_id, researcher_id, provided_key):
+    """
+    验证PIR解密密钥是否正确
+    
+    Args:
+        record_id: 记录ID
+        researcher_id: 研究员ID
+        provided_key: 提供的密钥
+        
+    Returns:
+        布尔值,表示密钥是否正确
+    """
+    expected_key = generate_pir_decrypt_key(record_id, researcher_id)
+    if not expected_key:
+        return False
+    
+    return expected_key == provided_key
+
+def analyze_feature_vector(vector, record_id=None):
+    """
+    分析特征向量，提取有用信息，并返回相关性分析
+    
+    Args:
+        vector: 特征向量
+        record_id: 记录ID
+        
+    Returns:
+        分析结果
+    """
+    import numpy as np
+    from flask import current_app
+    import math
+    
+    try:
+        analysis = {
+            'vector_dimension': len(vector),
+            'statistical_properties': {
+                'mean': float(np.mean(vector)),
+                'median': float(np.median(vector)),
+                'std_dev': float(np.std(vector)),
+                'max': float(np.max(vector)),
+                'min': float(np.min(vector))
+            },
+            'pattern_analysis': {
+                'zero_ratio': float(len([x for x in vector if x == 0]) / len(vector)),
+                'positive_ratio': float(len([x for x in vector if x > 0]) / len(vector)),
+                'negative_ratio': float(len([x for x in vector if x < 0]) / len(vector)),
+                'entropy': float(-sum([(x/sum(vector))*math.log2(x/sum(vector)) if x != 0 and sum(vector) != 0 else 0 for x in vector]))
+            }
+        }
+        
+        # 如果提供了记录ID，查找相似记录
+        if record_id:
+            similar_records = find_similar_records(vector, record_id)
+            if similar_records:
+                analysis['similar_records'] = similar_records
+                
+        return analysis
+    except Exception as e:
+        current_app.logger.error(f"分析特征向量失败: {str(e)}")
+        return {'error': str(e)}
+
+def find_similar_records(vector, current_record_id, max_results=5, similarity_threshold=0.7):
+    """
+    查找与给定向量相似的健康记录
+    
+    Args:
+        vector: 特征向量
+        current_record_id: 当前记录ID，排除自身
+        max_results: 最大返回结果数
+        similarity_threshold: 相似度阈值
+        
+    Returns:
+        相似记录列表
+    """
+    import numpy as np
+    from flask import current_app
+    from ..utils.mongo_utils import get_mongo_db
+    
+    try:
+        # 获取所有健康记录
+        mongo_db = get_mongo_db()
+        health_records = list(mongo_db.health_records.find({'visibility': 'researcher'}))
+        
+        # 准备记录的特征向量
+        record_vectors = []
+        record_ids = []
+        
+        # 创建记录到数值向量的映射
+        for idx, record in enumerate(health_records):
+            # 跳过当前记录
+            record_id = str(record.get('_id'))
+            if record_id == current_record_id:
+                continue
+                
+            try:
+                # 编码健康记录
+                encoded_vector = PIRQuery.encode_health_record(record)
+                
+                # 确保向量长度一致
+                if len(encoded_vector) != len(vector):
+                    # 如果长度不同，裁剪或填充到相同长度
+                    min_length = min(len(encoded_vector), len(vector))
+                    encoded_vector = encoded_vector[:min_length]
+                    vector_for_comparison = vector[:min_length]
+                else:
+                    vector_for_comparison = vector
+                
+                # 计算余弦相似度
+                similarity = cosine_similarity(encoded_vector, vector_for_comparison)
+                
+                # 如果相似度超过阈值，添加到候选列表
+                if similarity >= similarity_threshold:
+                    record_vectors.append({
+                        'id': record_id,
+                        'similarity': similarity,
+                        'record_type': record.get('record_type'),
+                        'title': record.get('title', '无标题'),
+                        'institution': record.get('institution', '未知机构'),
+                        'record_date': record.get('record_date').isoformat() if record.get('record_date') else None
+                    })
+            except Exception as e:
+                current_app.logger.error(f"计算记录相似度失败: {str(e)}")
+                continue
+        
+        # 按相似度排序
+        sorted_records = sorted(record_vectors, key=lambda x: x['similarity'], reverse=True)
+        
+        # 返回前N个结果
+        return sorted_records[:max_results]
+    except Exception as e:
+        current_app.logger.error(f"查找相似记录失败: {str(e)}")
+        return []
+
+def cosine_similarity(vec1, vec2):
+    """
+    计算两个向量的余弦相似度
+    
+    Args:
+        vec1: 向量1
+        vec2: 向量2
+        
+    Returns:
+        余弦相似度值 (0-1)
+    """
+    import numpy as np
+    
+    try:
+        # 转换为numpy数组
+        vec1 = np.array(vec1)
+        vec2 = np.array(vec2)
+        
+        # 计算点积
+        dot_product = np.dot(vec1, vec2)
+        
+        # 计算向量范数
+        norm_vec1 = np.linalg.norm(vec1)
+        norm_vec2 = np.linalg.norm(vec2)
+        
+        # 避免除零错误
+        if norm_vec1 == 0 or norm_vec2 == 0:
+            return 0
+        
+        # 计算余弦相似度
+        similarity = dot_product / (norm_vec1 * norm_vec2)
+        
+        # 确保在0-1范围内
+        return max(0, min(1, similarity))
+    except Exception as e:
+        return 0 

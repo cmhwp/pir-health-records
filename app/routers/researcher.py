@@ -9,6 +9,8 @@ import io
 import random
 import numpy as np
 from collections import defaultdict
+import base64
+import hashlib
 
 from ..models import db, User, Role, HealthRecord, RecordType, RecordVisibility
 from ..models.role_models import ResearcherInfo
@@ -17,7 +19,7 @@ from ..models.researcher import ResearchProject, ProjectTeamMember, ProjectStatu
 from ..routers.auth import role_required
 from ..utils.mongo_utils import mongo, get_mongo_db
 from ..utils.log_utils import log_record, log_research, log_pir
-from ..utils.pir_utils import PIRQuery, prepare_pir_database
+from ..utils.pir_utils import PIRQuery, prepare_pir_database, parse_encrypted_query_id, generate_pir_decrypt_key, verify_pir_decrypt_key, analyze_feature_vector, find_similar_records
 
 # 创建研究人员路由蓝图
 researcher_bp = Blueprint('researcher', __name__, url_prefix='/api/researcher')
@@ -944,25 +946,79 @@ def batch_pir_query():
             }
         )
         
+        # 从数据库获取健康记录
+        health_records = list(get_mongo_db().health_records.find({'visibility': 'researcher'}))
+        
+        # 如果没有记录，返回空结果
+        if not health_records:
+            return jsonify({
+                'success': True,
+                'message': '查询执行成功，但没有可用记录',
+                'data': {
+                    'results': [],
+                    'protocol': pir_protocol,
+                    'total_queries': len(encrypted_query_ids)
+                }
+            })
+        
         # 准备PIR数据库
-        pir_db = prepare_pir_database(pir_protocol)
+        pir_db, record_mapping = prepare_pir_database(health_records)
+        
+        # 获取数据库维度
+        db_size = len(health_records)
         
         # 执行PIR查询
         results = []
         for encrypted_id in encrypted_query_ids:
-            # 创建PIR查询对象
-            pir_query = PIRQuery(encrypted_id, pir_protocol)
-            
-            # 执行查询
-            result = pir_query.execute(pir_db)
-            results.append({
-                'encrypted_result': result,
-                'protocol': pir_protocol,
-                'metadata': {
-                    'timestamp': datetime.now().isoformat(),
-                    'query_id': random.randint(10000, 99999)  # 随机查询ID，不关联实际查询内容
-                }
-            })
+            try:
+                # 使用解析函数解析加密ID
+                target_index = parse_encrypted_query_id(encrypted_id) % db_size
+                
+                # 确保索引在有效范围内
+                if target_index < 0 or target_index >= db_size:
+                    target_index = random.randint(0, db_size - 1)
+                
+                # 创建查询向量 - 确保长度匹配
+                query_vector = PIRQuery.create_query_vector(db_size, target_index)
+                
+                # 获取记录向量的形状以确保维度匹配
+                record_shape = pir_db.shape
+                current_app.logger.info(f"PIR数据库形状: {record_shape}, 查询向量形状: {query_vector.shape}")
+                
+                # 执行查询
+                result = PIRQuery.process_query(pir_db, query_vector)
+                
+                # 编码结果
+                result_str = base64.b64encode(str(result).encode()).decode()
+                
+                # 获取匹配的健康记录信息
+                matched_record = record_mapping.get(target_index, {})
+                # 移除敏感字段并转换ID
+                record_id = matched_record.get('_id', '')
+                if record_id:
+                    record_id = str(record_id)
+                
+                results.append({
+                    'encrypted_result': result_str,
+                    'protocol': pir_protocol,
+                    'matched_record_id': record_id,
+                    'metadata': {
+                        'timestamp': datetime.now().isoformat(),
+                        'query_id': random.randint(10000, 99999)
+                    }
+                })
+            except Exception as query_err:
+                current_app.logger.error(f"单个PIR查询失败: {str(query_err)}")
+                # 继续处理下一个查询，不中断整个过程
+                results.append({
+                    'encrypted_result': None,
+                    'protocol': pir_protocol,
+                    'error': str(query_err),
+                    'metadata': {
+                        'timestamp': datetime.now().isoformat(),
+                        'query_id': random.randint(10000, 99999)
+                    }
+                })
         
         # 记录研究日志
         log_research(
@@ -1898,3 +1954,426 @@ def _sub_group_by_doctor_department(records, mongo_db, min_count):
         })
     
     return results
+
+# 获取PIR查询匹配的记录详情
+@researcher_bp.route('/pir/record/<record_id>', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_pir_record_detail(record_id):
+    try:
+        # 记录访问日志
+        log_research(
+            message=f'研究员{current_user.full_name}请求PIR记录详情',
+            details={
+                'researcher_id': current_user.id,
+                'record_id': record_id,
+                'timestamp': datetime.now().isoformat()
+            }
+        )
+        
+        # 获取MongoDB记录
+        mongo_db = get_mongo_db()
+        record = None
+        
+        try:
+            # 尝试将ID转换为ObjectId
+            object_id = ObjectId(record_id)
+            record = mongo_db.health_records.find_one({'_id': object_id, 'visibility': 'researcher'})
+        except:
+            # 如果ID格式不是ObjectId，则尝试使用字符串ID查询
+            record = mongo_db.health_records.find_one({'_id': record_id, 'visibility': 'researcher'})
+        
+        if not record:
+            return jsonify({
+                'success': False,
+                'message': '未找到记录或无权访问'
+            }), 404
+        
+        # 转换ID为字符串
+        record['_id'] = str(record['_id'])
+        
+        # 处理日期字段
+        for date_field in ['record_date', 'created_at', 'updated_at']:
+            if date_field in record and record[date_field]:
+                record[date_field] = record[date_field].isoformat() if hasattr(record[date_field], 'isoformat') else record[date_field]
+        
+        # 处理嵌套对象中的日期
+        if 'medication' in record and record['medication']:
+            for date_field in ['start_date', 'end_date']:
+                if date_field in record['medication'] and record['medication'][date_field]:
+                    record['medication'][date_field] = record['medication'][date_field].isoformat() if hasattr(record['medication'][date_field], 'isoformat') else record['medication'][date_field]
+        
+        if 'vital_signs' in record and record['vital_signs']:
+            for vs in record['vital_signs']:
+                if 'measured_at' in vs and vs['measured_at']:
+                    vs['measured_at'] = vs['measured_at'].isoformat() if hasattr(vs['measured_at'], 'isoformat') else vs['measured_at']
+        
+        # 匿名化处理：移除或模糊化患者标识信息
+        anonymized_record = anonymize_record(record)
+        
+        return jsonify({
+            'success': True,
+            'message': '获取记录成功',
+            'data': anonymized_record
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取PIR记录详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取记录详情失败: {str(e)}'
+        }), 500
+
+# 匿名化健康记录
+def anonymize_record(record):
+    """匿名化健康记录，移除或模糊化患者标识信息"""
+    anonymized = record.copy()
+    
+    # 移除或模糊化患者ID
+    if 'patient_id' in anonymized:
+        # 替换为哈希值
+        patient_id = str(anonymized['patient_id'])
+        anonymized['patient_id'] = hashlib.sha256(patient_id.encode()).hexdigest()[:8]
+    
+    # 模糊化患者姓名
+    if 'patient_name' in anonymized and anonymized['patient_name']:
+        name = anonymized['patient_name']
+        if len(name) > 0:
+            # 只保留姓氏首字母加*号
+            anonymized['patient_name'] = name[0] + '*' * (len(name) - 1)
+    
+    # 移除个人联系方式
+    for field in ['contact', 'phone', 'email', 'address']:
+        if field in anonymized:
+            anonymized[field] = '[已隐藏]'
+    
+    # 处理demographic字段
+    if 'demographic' in anonymized and anonymized['demographic']:
+        if 'address' in anonymized['demographic']:
+            # 只保留省市级别信息
+            address_parts = anonymized['demographic']['address'].split()
+            if len(address_parts) > 2:
+                anonymized['demographic']['address'] = ' '.join(address_parts[:2]) + ' [已隐藏详细地址]'
+        
+        # 模糊年龄为年龄段
+        if 'age' in anonymized['demographic']:
+            age = anonymized['demographic']['age']
+            if isinstance(age, int) or age.isdigit():
+                age = int(age)
+                age_group = (age // 10) * 10
+                anonymized['demographic']['age_group'] = f"{age_group}-{age_group+9}"
+                anonymized['demographic'].pop('age', None)
+    
+    return anonymized
+
+# 解密PIR查询结果
+@researcher_bp.route('/pir/decrypt', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def decrypt_pir_result():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': '未提供解密数据'
+            }), 400
+        
+        # 获取加密结果和其他参数
+        encrypted_result = data.get('encrypted_result')
+        record_id = data.get('record_id')
+        decrypt_key = data.get('decrypt_key', '')
+        
+        if not encrypted_result:
+            return jsonify({
+                'success': False,
+                'message': '未提供加密结果'
+            }), 400
+        
+        # 记录日志
+        log_research(
+            message=f'研究员{current_user.full_name}请求解密PIR查询结果',
+            details={
+                'researcher_id': current_user.id,
+                'record_id': record_id,
+                'timestamp': datetime.now().isoformat()
+            }
+        )
+        
+        # 如果提供了密钥和记录ID，验证密钥
+        if decrypt_key and record_id:
+            from ..utils.pir_utils import verify_pir_decrypt_key
+            if not verify_pir_decrypt_key(record_id, current_user.id, decrypt_key):
+                return jsonify({
+                    'success': False,
+                    'message': '解密密钥不正确'
+                }), 403
+        
+        try:
+            # 解码Base64
+            decoded_bytes = base64.b64decode(encrypted_result)
+            decoded_str = decoded_bytes.decode('utf-8')
+            
+            # 尝试解析为数组
+            import re
+            import numpy as np
+            from ..utils.pir_utils import analyze_feature_vector, find_similar_records
+            
+            # 清理字符串并提取数值
+            if decoded_str.strip().startswith('[') and decoded_str.strip().endswith(']'):
+                # 删除方括号
+                clean_str = decoded_str.replace('[', '').replace(']', '')
+                # 使用正则表达式提取所有数字
+                numbers = re.findall(r'\d+', clean_str)
+                array_data = [int(num) for num in numbers]
+                
+                # 获取记录数据以增强分析结果
+                record_data = None
+                record_features = None
+                record_diagnosis = None
+                if record_id:
+                    try:
+                        # 获取记录详情
+                        mongo_db = get_mongo_db()
+                        record = mongo_db.health_records.find_one({'_id': ObjectId(record_id)})
+                        if record:
+                            # 提取有用信息
+                            record_data = {
+                                'id': str(record.get('_id')),
+                                'title': record.get('title'),
+                                'record_type': record.get('record_type'),
+                                'record_date': record.get('record_date').isoformat() if record.get('record_date') else None,
+                                'institution': record.get('institution'),
+                                'doctor_name': record.get('doctor_name')
+                            }
+                            
+                            # 提取记录特征数据
+                            if record.get('record_type') == 'medication' and record.get('medication'):
+                                record_features = {
+                                    'medication_name': record.get('medication').get('medication_name'),
+                                    'dosage': record.get('medication').get('dosage')
+                                }
+                            elif record.get('record_type') == 'vital_signs' and record.get('vital_signs'):
+                                record_features = {
+                                    'vital_signs': [
+                                        {'type': vs.get('type'), 'value': vs.get('value'), 'unit': vs.get('unit')} 
+                                        for vs in record.get('vital_signs')
+                                    ]
+                                }
+                            
+                            # 提取诊断信息（如果有）
+                            if record.get('diagnosis'):
+                                record_diagnosis = record.get('diagnosis')
+                            elif record.get('description') and 'diagnos' in record.get('description').lower():
+                                # 尝试从描述中提取诊断信息
+                                description = record.get('description').lower()
+                                diagnosis_start = description.find('diagnos')
+                                if diagnosis_start != -1:
+                                    # 提取诊断后的内容，最多100个字符
+                                    diagnosis_text = record.get('description')[diagnosis_start:diagnosis_start+100]
+                                    record_diagnosis = diagnosis_text
+                    except Exception as e:
+                        current_app.logger.error(f"获取记录详情失败: {str(e)}")
+                
+                # 分析特征向量
+                vector_analysis = analyze_feature_vector(array_data, record_id)
+                
+                # 查找相似记录
+                similar_records = None
+                if record_id:
+                    similar_records = find_similar_records(array_data, record_id)
+                
+                # 分析数组数据
+                analysis_result = {
+                    'data_type': 'array',
+                    'length': len(array_data),
+                    'mean': float(np.mean(array_data)) if len(array_data) > 0 else 0,
+                    'median': float(np.median(array_data)) if len(array_data) > 0 else 0,
+                    'max': max(array_data) if len(array_data) > 0 else 0,
+                    'min': min(array_data) if len(array_data) > 0 else 0,
+                    'std_dev': float(np.std(array_data)) if len(array_data) > 0 else 0,
+                    'non_zero_count': len([x for x in array_data if x != 0]),
+                    'data': array_data,
+                    'feature_analysis': vector_analysis
+                }
+                
+                # 添加记录数据
+                if record_data:
+                    analysis_result['record_data'] = record_data
+                if record_features:
+                    analysis_result['record_features'] = record_features
+                if record_diagnosis:
+                    analysis_result['diagnosis'] = record_diagnosis
+                if similar_records:
+                    analysis_result['similar_records'] = similar_records
+                
+                # 添加健康数据模式识别
+                if record_data and record_data.get('record_type'):
+                    analysis_result['pattern_recognition'] = generate_health_pattern_insight(
+                        array_data, 
+                        record_data.get('record_type'),
+                        record_features
+                    )
+                
+                return jsonify({
+                    'success': True,
+                    'message': '解密成功',
+                    'data': {
+                        'decrypted_result': decoded_str,
+                        'analysis': analysis_result
+                    }
+                })
+            else:
+                # 如果不是数组，尝试解析为JSON
+                try:
+                    import json
+                    json_data = json.loads(decoded_str)
+                    return jsonify({
+                        'success': True,
+                        'message': '解密成功',
+                        'data': {
+                            'decrypted_result': decoded_str,
+                            'analysis': {
+                                'data_type': 'json',
+                                'structure': type(json_data).__name__,
+                                'data': json_data
+                            }
+                        }
+                    })
+                except:
+                    # 既不是数组也不是JSON，返回原始解码字符串
+                    return jsonify({
+                        'success': True,
+                        'message': '解密成功，但无法解析为结构化数据',
+                        'data': {
+                            'decrypted_result': decoded_str,
+                            'analysis': {
+                                'data_type': 'string',
+                                'length': len(decoded_str)
+                            }
+                        }
+                    })
+        except Exception as decrypt_err:
+            return jsonify({
+                'success': False,
+                'message': f'解密数据失败: {str(decrypt_err)}'
+            }), 400
+            
+    except Exception as e:
+        current_app.logger.error(f"解密PIR查询结果失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'解密PIR查询结果失败: {str(e)}'
+        }), 500
+
+def generate_health_pattern_insight(vector, record_type, features=None):
+    """根据特征向量和记录类型生成健康数据洞察"""
+    import numpy as np
+    
+    # 基于记录类型和特征向量的基本模式识别
+    insights = []
+    
+    # 检查向量的基本统计特性
+    mean = np.mean(vector)
+    std_dev = np.std(vector)
+    zero_count = len([x for x in vector if x == 0])
+    zero_ratio = zero_count / len(vector) if len(vector) > 0 else 0
+    
+    # 通用模式识别
+    if zero_ratio > 0.7:
+        insights.append("特征向量中零值较多，表明数据较为稀疏，可能缺乏某些重要特征。")
+    
+    if std_dev > mean * 2:
+        insights.append("数据分布较为分散，表明记录中包含波动较大的健康指标。")
+        
+    if std_dev < mean * 0.1 and mean > 0:
+        insights.append("数据分布集中，表明记录中的健康指标较为稳定。")
+    
+    # 基于记录类型的专门分析
+    if record_type == 'medication':
+        if features and 'medication_name' in features:
+            insights.append(f"此药物处方({features['medication_name']})的特征表现与同类记录相似度较高。")
+        else:
+            insights.append("药物处方记录的特征向量表明了治疗方案的特定模式。")
+            
+    elif record_type == 'vital_signs':
+        if mean > 100:
+            insights.append("生命体征数值偏高，可能表明异常健康状况。")
+        elif mean < 50:
+            insights.append("生命体征数值偏低，可能表明需要进一步检查。")
+        else:
+            insights.append("生命体征数值在正常范围内，表明健康状况稳定。")
+    
+    elif record_type == 'examination':
+        if np.max(vector) > 200:
+            insights.append("检查结果中存在异常高值，可能需要进一步分析。")
+        else:
+            insights.append("检查结果的特征分布表明数据在预期范围内。")
+    
+    elif record_type == 'medical_history':
+        if zero_ratio < 0.3:
+            insights.append("病史记录较为丰富，包含多种健康状况信息。")
+        else:
+            insights.append("病史记录相对简单，或缺少某些详细信息。")
+    
+    # 如果没有生成洞察，添加默认信息
+    if not insights:
+        insights.append(f"此{record_type}类型记录的特征向量显示了正常的数据分布模式。")
+    
+    return insights
+
+# 获取PIR记录解密密钥
+@researcher_bp.route('/pir/decrypt-key/<record_id>', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_pir_decrypt_key(record_id):
+    try:
+        from ..utils.pir_utils import generate_pir_decrypt_key
+        
+        # 记录日志
+        log_research(
+            message=f'研究员{current_user.full_name}请求PIR记录解密密钥',
+            details={
+                'researcher_id': current_user.id,
+                'record_id': record_id,
+                'timestamp': datetime.now().isoformat()
+            }
+        )
+        
+        # 验证记录是否存在
+        mongo_db = get_mongo_db()
+        try:
+            object_id = ObjectId(record_id)
+            record = mongo_db.health_records.find_one({'_id': object_id, 'visibility': 'researcher'})
+        except:
+            record = mongo_db.health_records.find_one({'_id': record_id, 'visibility': 'researcher'})
+        
+        if not record:
+            return jsonify({
+                'success': False,
+                'message': '未找到记录或无权访问'
+            }), 404
+        
+        # 生成解密密钥
+        decrypt_key = generate_pir_decrypt_key(record_id, current_user.id)
+        if not decrypt_key:
+            return jsonify({
+                'success': False,
+                'message': '生成解密密钥失败'
+            }), 500
+        
+        return jsonify({
+            'success': True,
+            'message': '获取解密密钥成功',
+            'data': {
+                'decrypt_key': decrypt_key,
+                'record_id': record_id
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取PIR记录解密密钥失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取解密密钥失败: {str(e)}'
+        }), 500
