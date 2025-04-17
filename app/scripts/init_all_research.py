@@ -30,5 +30,6 @@ def init_all_research():
     
     print("\n=== 所有研究相关数据初始化完成! ===")
 
+
 if __name__ == "__main__":
     init_all_research() 

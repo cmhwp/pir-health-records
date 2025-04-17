@@ -39,6 +39,7 @@ class HealthRecord(db.Model):
     mongo_id = db.Column(db.String(24), nullable=True, index=True)  # MongoDB中的记录ID，用于关联
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    is_encrypted = db.Column(db.Boolean, default=False)  # 记录是否加密
     
     # 关联表
     files = db.relationship('RecordFile', backref='record', cascade='all, delete-orphan')  # 关联文件
@@ -59,6 +60,7 @@ class HealthRecord(db.Model):
             'title': self.title,
             'record_date': self.record_date.isoformat() if self.record_date else None,
             'visibility': self.visibility.value,
+            'is_encrypted': self.is_encrypted,
             'files': [file.to_dict() for file in self.files],
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
@@ -123,7 +125,8 @@ class HealthRecord(db.Model):
             title=mongo_doc.get('title', ''),
             record_date=record_date,
             visibility=visibility,
-            mongo_id=str(mongo_doc.get('_id'))
+            mongo_id=str(mongo_doc.get('_id')),
+            is_encrypted=mongo_doc.get('is_encrypted', False)
         )
         
         return record
@@ -186,6 +189,9 @@ class HealthRecord(db.Model):
                 self.visibility = RecordVisibility(mongo_record.get('visibility'))
             except (ValueError, TypeError):
                 pass
+            
+            # 更新加密状态
+            self.is_encrypted = mongo_record.get('is_encrypted', False)
                 
             self.updated_at = datetime.now()
             db.session.commit()

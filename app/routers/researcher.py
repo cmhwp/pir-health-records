@@ -443,16 +443,20 @@ def get_time_distribution():
         
         # 根据间隔设置日期格式和时间范围
         if interval == 'day':
-            date_format = '%Y-%m-%d'
-            time_expr = func.date(HealthRecord.created_at)
+            # MySQL 使用 DATE() 提取日期部分
+            time_expr = func.DATE(HealthRecord.created_at)
             time_range = datetime.now() - timedelta(days=limit)
         elif interval == 'week':
-            date_format = '%Y-%U'  # 年-周数
-            time_expr = func.strftime('%Y-%U', HealthRecord.created_at)
+            # MySQL 使用 YEARWEEK() 获取年-周
+            time_expr = func.concat(
+                func.year(HealthRecord.created_at), 
+                '-', 
+                func.lpad(func.week(HealthRecord.created_at), 2, '0')
+            )
             time_range = datetime.now() - timedelta(weeks=limit)
         else:  # 默认按月
-            date_format = '%Y-%m'
-            time_expr = func.strftime('%Y-%m', HealthRecord.created_at)
+            # MySQL 使用 DATE_FORMAT() 格式化日期
+            time_expr = func.date_format(HealthRecord.created_at, '%Y-%m')
             time_range = datetime.now() - timedelta(days=30 * limit)
         
         # 查询每个时间间隔的记录数量
