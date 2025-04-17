@@ -35,6 +35,9 @@ def create_app(config_name="development"):
         
         # 应用系统设置
         init_system_settings(app)
+        
+        # 初始化记录类型处理
+        init_record_types(app)
     
     # 注册蓝图
     from .routers.main import main_bp
@@ -288,3 +291,66 @@ def create_default_settings():
     
     # 提交所有设置
     db.session.commit() 
+
+def init_record_types(app):
+    """初始化记录类型处理，确保系统能够使用数据库中的记录类型"""
+    try:
+        # 导入这里避免循环导入
+        from .models.health_records import RecordType
+        from .models.institution import CustomRecordType
+        
+        # 确保至少有一些基本记录类型存在于数据库中
+        record_types_count = CustomRecordType.query.count()
+        
+        if record_types_count == 0:
+            app.logger.info("创建基本记录类型...")
+            # 从RecordType枚举中获取默认类型
+            default_types = [
+                {'code': record_type.value, 'name': record_type.name}
+                for record_type in RecordType
+            ]
+            
+            # 映射名称和中文描述
+            name_mapping = {
+                'MEDICAL_HISTORY': '病历',
+                'EXAMINATION': '检查报告',
+                'MEDICATION': '用药记录',
+                'VITAL_SIGNS': '生命体征',
+                'TREATMENT': '治疗记录',
+                'SURGERY': '手术记录',
+                'OTHER': '其他'
+            }
+            
+            # 颜色映射
+            color_mapping = {
+                'MEDICAL_HISTORY': '#1890ff',
+                'EXAMINATION': '#52c41a',
+                'MEDICATION': '#fa8c16',
+                'VITAL_SIGNS': '#eb2f96',
+                'TREATMENT': '#722ed1',
+                'SURGERY': '#f5222d',
+                'OTHER': '#bfbfbf'
+            }
+            
+            # 创建基本类型
+            for type_info in default_types:
+                code = type_info['code']
+                name = name_mapping.get(type_info['name'], type_info['name'])
+                color = color_mapping.get(type_info['name'], '#1890ff')
+                
+                record_type = CustomRecordType(
+                    code=code,
+                    name=name,
+                    description=f'{name}记录类型',
+                    color=color,
+                    icon='📋',
+                    is_active=True
+                )
+                db.session.add(record_type)
+            
+            db.session.commit()
+            app.logger.info(f"已创建 {len(default_types)} 个基本记录类型")
+        
+        app.logger.info("记录类型初始化完成")
+    except Exception as e:
+        app.logger.error(f"初始化记录类型失败: {str(e)}") 

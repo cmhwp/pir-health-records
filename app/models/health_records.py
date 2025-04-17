@@ -7,8 +7,12 @@ from flask import current_app, g
 import pymongo
 from sqlalchemy import Column, String
 from ..utils.mongo_utils import get_mongo_db, format_mongo_doc
+from functools import wraps
 
-class RecordType(enum.Enum):
+# 修改为动态获取的记录类型
+class RecordType(str, enum.Enum):
+    """健康记录类型枚举，值从数据库中的 CustomRecordType 获取"""
+    # 设置基本类型，这些会被数据库中的值覆盖
     MEDICAL_HISTORY = "medical_history"  # 病历
     EXAMINATION = "examination"          # 检查报告
     MEDICATION = "medication"            # 用药记录
@@ -16,6 +20,34 @@ class RecordType(enum.Enum):
     TREATMENT = "treatment"              # 治疗记录
     SURGERY = "surgery"                  # 手术记录
     OTHER = "other"                      # 其他
+    
+    @classmethod
+    def get_from_db(cls):
+        """从数据库获取记录类型"""
+        from ..models.institution import CustomRecordType
+        
+        try:
+            # 获取数据库中的所有记录类型
+            custom_types = CustomRecordType.query.filter_by(is_active=True).all()
+            
+            # 创建一个包含所有类型代码的字典
+            type_dict = {record_type.code: record_type.code for record_type in custom_types}
+            
+            # 如果没有类型，返回默认枚举
+            if not type_dict:
+                return cls
+                
+            # 创建一个新的枚举类，包含数据库中的值
+            return enum.Enum(
+                value='RecordType',
+                names=type_dict,
+                type=str,
+                module=cls.__module__
+            )
+        except Exception as e:
+            current_app.logger.error(f"从数据库获取记录类型失败: {str(e)}")
+            # 发生错误时返回默认枚举
+            return cls
 
 class RecordVisibility(enum.Enum):
     PRIVATE = "private"        # 仅患者可见
@@ -32,7 +64,7 @@ class HealthRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     patient_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     doctor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # 记录创建医生
-    record_type = db.Column(db.Enum(RecordType), nullable=False)  # 记录类型
+    record_type = db.Column(db.String(50), nullable=False)  # 记录类型，改为字符串类型字段
     title = db.Column(db.String(100), nullable=False)  # 记录标题
     record_date = db.Column(db.DateTime, nullable=False)  # 记录日期
     visibility = db.Column(db.Enum(RecordVisibility), default=RecordVisibility.PRIVATE)  # 可见性
@@ -56,7 +88,7 @@ class HealthRecord(db.Model):
             'id': self.id,
             'patient_id': self.patient_id,
             'doctor_id': self.doctor_id,
-            'record_type': self.record_type.value,
+            'record_type': self.record_type,
             'title': self.title,
             'record_date': self.record_date.isoformat() if self.record_date else None,
             'visibility': self.visibility.value,
@@ -102,10 +134,7 @@ class HealthRecord(db.Model):
             return None
             
         # 转换记录类型和可见性
-        try:
-            record_type = RecordType(mongo_doc.get('record_type'))
-        except (ValueError, TypeError):
-            record_type = RecordType.OTHER
+        record_type = mongo_doc.get('record_type', 'OTHER') 
             
         try:
             visibility = RecordVisibility(mongo_doc.get('visibility'))
@@ -175,10 +204,8 @@ class HealthRecord(db.Model):
                 return False
                 
             # 更新基本字段
-            try:
-                self.record_type = RecordType(mongo_record.get('record_type'))
-            except (ValueError, TypeError):
-                pass
+            if 'record_type' in mongo_record and mongo_record['record_type']:
+                self.record_type = mongo_record['record_type']
                 
             self.title = mongo_record.get('title', self.title)
             
@@ -372,7 +399,6 @@ def mongo_health_record_to_dict(mongo_record):
 def cached_mongo_record(timeout=300):
     """MongoDB记录查询缓存装饰器"""
     def decorator(f):
-        from functools import wraps
         @wraps(f)
         def wrapper(record_id, *args, **kwargs):
             # 使用Flask缓存
