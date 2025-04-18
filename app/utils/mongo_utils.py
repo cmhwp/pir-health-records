@@ -65,14 +65,46 @@ class MongoJSONEncoder(json.JSONEncoder):
 
 def format_mongo_doc(doc):
     """
-    格式化MongoDB文档以便JSON响应（将ObjectId转换为字符串）。
+    格式化MongoDB文档以便JSON响应（处理ObjectId和datetime对象）。
+    递归处理嵌套的字典和列表。
     """
-    if doc and '_id' in doc and isinstance(doc['_id'], ObjectId):
-        doc['_id'] = str(doc['_id'])
-    return doc
+    if not doc:
+        return doc
+        
+    if isinstance(doc, dict):
+        result = {}
+        for key, value in doc.items():
+            if key == '_id' and isinstance(value, ObjectId):
+                result[key] = str(value)
+            elif isinstance(value, datetime.datetime):
+                result[key] = value.isoformat()
+            elif isinstance(value, datetime.date):
+                result[key] = value.isoformat()
+            elif isinstance(value, dict):
+                result[key] = format_mongo_doc(value)
+            elif isinstance(value, list):
+                result[key] = format_mongo_docs(value)
+            else:
+                result[key] = value
+        return result
+    elif isinstance(doc, ObjectId):
+        return str(doc)
+    elif isinstance(doc, datetime.datetime):
+        return doc.isoformat()
+    elif isinstance(doc, datetime.date):
+        return doc.isoformat()
+    else:
+        return doc
 
 def format_mongo_docs(docs):
     """
     格式化MongoDB文档列表以便JSON响应。
+    可以处理文档列表或其他值的列表。
     """
-    return [format_mongo_doc(doc) for doc in docs] 
+    if not docs:
+        return docs
+        
+    result = []
+    for item in docs:
+        result.append(format_mongo_doc(item))
+    return result 

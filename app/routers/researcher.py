@@ -20,7 +20,7 @@ from ..models.institution import CustomRecordType
 from ..routers.auth import role_required
 from ..utils.mongo_utils import mongo, get_mongo_db
 from ..utils.log_utils import log_record, log_research, log_pir
-from ..utils.pir_utils import PIRQuery, prepare_pir_database, parse_encrypted_query_id
+from ..utils.pir_utils import PIRQuery, prepare_pir_database, parse_encrypted_query_id, find_similar_records
 
 # 创建研究人员路由蓝图
 researcher_bp = Blueprint('researcher', __name__, url_prefix='/api/researcher')
@@ -188,6 +188,7 @@ def get_accessible_records():
                 'record_type_name': record_type_name,
                 'patient_id': record.patient_id,
                 'doctor_id': record.doctor_id,
+                'record_date': mongo_data.get('record_date').isoformat() if mongo_data.get('record_date') and hasattr(mongo_data.get('record_date'), 'isoformat') else mongo_data.get('record_date'),   
                 'created_at': record.created_at.isoformat(),
                 'updated_at': record.updated_at.isoformat() if record.updated_at else None,
                 'visibility': record.visibility.value,
@@ -2183,12 +2184,13 @@ def decrypt_pir_result():
                         if record:
                             # 提取有用信息
                             record_data = {
-                                'id': str(record.get('_id')),
-                                'title': record.get('title'),
-                                'record_type': record.get('record_type'),
-                                'record_date': record.get('record_date').isoformat() if record.get('record_date') else None,
-                                'institution': record.get('institution'),
-                                'doctor_name': record.get('doctor_name')
+                                'id': record.get('_id', ''),
+                                'title': record.get('title', ''),
+                                'description': record.get('description', ''),
+                                'record_type': record.get('record_type', ''),
+                                'record_date': record.get('record_date').isoformat() if record.get('record_date') and hasattr(record.get('record_date'), 'isoformat') else record.get('record_date'),
+                                'doctor_name': record.get('doctor_name', ''),
+                                'institution': record.get('institution')
                             }
                             
                             # 提取记录特征数据
@@ -2244,31 +2246,26 @@ def decrypt_pir_result():
                 # 如果有记录ID，尝试查找相似记录
                 if record_id:
                     try:
-                        # 模拟相似记录数据（实际应用中应该基于真实相似性计算）
-                        similar_records = [
-                            {
-                                'id': f'sim_{record_id}_1',
-                                'similarity': 0.85,
-                                'record_type': 'examination',
-                                'title': '示例相似记录1',
-                                'institution': '上海瑞金医院',
-                                'record_date': datetime.now().isoformat()
-                            },
-                            {
-                                'id': f'sim_{record_id}_2',
-                                'similarity': 0.72,
-                                'record_type': 'medical_history',
-                                'title': '示例相似记录2',
-                                'institution': '北京协和医院',
-                                'record_date': datetime.now().isoformat()
-                            }
-                        ]
-                        analysis_result['similar_records'] = similar_records
+                        # 查找与当前记录向量相似的健康记录
+                        similar_records = find_similar_records(
+                            vector=array_data, 
+                            current_record_id=record_id,
+                            max_results=5,
+                            similarity_threshold=0.6
+                        )
+                        
+                        if similar_records:
+                            analysis_result['similar_records'] = similar_records
+                        else:
+                            analysis_result['similar_records'] = []
+                            current_app.logger.info(f"未找到与记录ID {record_id} 相似的记录")
                     except Exception as e:
                         current_app.logger.error(f"获取相似记录失败: {str(e)}")
+                        analysis_result['similar_records'] = []
                 
                 # 添加数据洞察
-                analysis_result['pattern_recognition'] = generate_health_pattern_insight(array_data, record_data['record_type'] if record_data else None)
+                record_type_value = record_data.get('record_type') if record_data else None
+                analysis_result['pattern_recognition'] = generate_health_pattern_insight(array_data, record_type_value)
                 
                 # 添加记录数据
                 if record_data:

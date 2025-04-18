@@ -20,22 +20,40 @@ def derive_key(key_material, salt=None, key_length=32):
     Returns:
         (derived_key, salt)
     """
+    # 确保key_material是字符串
+    if not isinstance(key_material, str):
+        key_material = str(key_material)
+        current_app.logger.warning("密钥材料不是字符串，已强制转换")
+    
     if not salt:
         salt = os.urandom(16)  # 生成随机盐值
+        current_app.logger.info("未提供盐值，生成新的随机盐值")
     elif isinstance(salt, str):
-        salt = base64.b64decode(salt)
+        try:
+            # 尝试Base64解码
+            salt = base64.b64decode(salt)
+            current_app.logger.info("盐值是字符串，已成功解码为二进制")
+        except Exception as e:
+            current_app.logger.error(f"盐值解码失败: {str(e)}，使用原始字符串的UTF-8编码")
+            salt = salt.encode('utf-8')
     
     # 使用PBKDF2进行密钥派生
-    backend = default_backend()
-    kdf = hashlib.pbkdf2_hmac(
-        'sha256',
-        key_material.encode('utf-8'),
-        salt,
-        iterations=100000,  # 高迭代次数增强安全性
-        dklen=key_length
-    )
-    
-    return kdf, base64.b64encode(salt).decode('utf-8')
+    try:
+        backend = default_backend()
+        kdf = hashlib.pbkdf2_hmac(
+            'sha256',
+            key_material.encode('utf-8'),
+            salt,
+            iterations=100000,  # 高迭代次数增强安全性
+            dklen=key_length
+        )
+        
+        encoded_salt = base64.b64encode(salt).decode('utf-8')
+        current_app.logger.info(f"密钥派生成功，盐值长度: {len(salt)}字节")
+        return kdf, encoded_salt
+    except Exception as e:
+        current_app.logger.error(f"密钥派生失败: {str(e)}")
+        raise ValueError(f"密钥派生失败: {str(e)}")
 
 def encrypt_data(data, key):
     """
@@ -87,24 +105,49 @@ def decrypt_data(encrypted_data, key):
     Returns:
         解密后的数据（字节）
     """
-    # 解码加密数据
-    ciphertext = base64.b64decode(encrypted_data['ciphertext'])
-    iv = base64.b64decode(encrypted_data['iv'])
-    tag = base64.b64decode(encrypted_data['tag'])
-    aad = base64.b64decode(encrypted_data['aad'])
-    
-    # 创建AES-GCM解密器
-    decryptor = Cipher(
-        algorithms.AES(key),
-        modes.GCM(iv, tag),
-        backend=default_backend()
-    ).decryptor()
-    
-    # 添加关联数据（AAD）
-    decryptor.authenticate_additional_data(aad)
-    
-    # 解密数据
-    return decryptor.update(ciphertext) + decryptor.finalize()
+    try:
+        # 解码加密数据
+        try:
+            ciphertext = base64.b64decode(encrypted_data['ciphertext'])
+            iv = base64.b64decode(encrypted_data['iv'])
+            tag = base64.b64decode(encrypted_data['tag'])
+            aad = base64.b64decode(encrypted_data['aad'])
+            
+            # 记录解密参数长度，帮助调试
+            current_app.logger.info(f"解密参数长度 - ciphertext: {len(ciphertext)}字节, iv: {len(iv)}字节, tag: {len(tag)}字节, key: {len(key)}字节")
+            
+        except Exception as e:
+            current_app.logger.error(f"解码加密参数失败: {str(e)}")
+            raise ValueError(f"解码加密参数失败: {str(e)}")
+        
+        # 检查密钥长度
+        if len(key) != 32:
+            current_app.logger.warning(f"密钥长度不是32字节 (实际长度: {len(key)}字节)")
+        
+        try:
+            # 创建AES-GCM解密器
+            decryptor = Cipher(
+                algorithms.AES(key),
+                modes.GCM(iv, tag),
+                backend=default_backend()
+            ).decryptor()
+            
+            # 添加关联数据（AAD）
+            decryptor.authenticate_additional_data(aad)
+            
+            # 解密数据
+            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            current_app.logger.info(f"数据成功解密，原始数据长度: {len(plaintext)}字节")
+            
+            return plaintext
+            
+        except Exception as e:
+            current_app.logger.error(f"AES-GCM解密失败: {str(e)}")
+            raise ValueError(f"解密失败: {str(e)}")
+            
+    except Exception as e:
+        current_app.logger.error(f"解密数据过程发生未捕获的错误: {str(e)}")
+        raise ValueError(f"解密数据失败: {str(e)}")
 
 def encrypt_record(record, encryption_key):
     """
@@ -163,21 +206,50 @@ def decrypt_record(encrypted_record, encryption_key):
     Returns:
         解密后的记录（字典）
     """
-    # 验证记录是否已加密
-    if not encrypted_record.get('is_encrypted') or 'encrypted_data' not in encrypted_record:
-        raise ValueError("记录未加密或格式无效")
-    
-    # 获取加密数据
-    encrypted_data = encrypted_record['encrypted_data']
-    salt = encrypted_record['key_salt']
-    
-    # 导出解密密钥
-    derived_key, _ = derive_key(encryption_key, salt)
-    
     try:
+        # 验证记录是否已加密
+        if not encrypted_record.get('is_encrypted', False):
+            current_app.logger.error("记录未标记为已加密")
+            raise ValueError("记录未加密或格式无效")
+        
+        # 检查所需的加密字段
+        if 'encrypted_data' not in encrypted_record:
+            current_app.logger.error("记录缺少encrypted_data字段")
+            raise ValueError("记录格式无效，缺少加密数据")
+            
+        if 'key_salt' not in encrypted_record:
+            current_app.logger.error("记录缺少key_salt字段")
+            raise ValueError("记录格式无效，缺少密钥盐值")
+        
+        # 获取加密数据
+        encrypted_data = encrypted_record['encrypted_data']
+        salt = encrypted_record['key_salt']
+        
+        # 记录加密信息
+        current_app.logger.info(f"加密算法: {encrypted_record.get('encryption_algorithm', '未知')}")
+        current_app.logger.info(f"加密数据类型: {type(encrypted_data).__name__}")
+        
+        # 导出解密密钥
+        derived_key, _ = derive_key(encryption_key, salt)
+        
+        # 检查加密数据结构
+        required_fields = ['ciphertext', 'iv', 'tag', 'aad']
+        for field in required_fields:
+            if field not in encrypted_data:
+                current_app.logger.error(f"加密数据缺少必要字段: {field}")
+                raise ValueError(f"加密数据格式无效，缺少 {field} 字段")
+        
         # 解密数据
         decrypted_json = decrypt_data(encrypted_data, derived_key)
-        decrypted_data = json.loads(decrypted_json)
+        
+        try:
+            # 解析JSON
+            decrypted_data = json.loads(decrypted_json)
+            current_app.logger.info("解密数据已成功解析为JSON")
+        except json.JSONDecodeError as e:
+            current_app.logger.error(f"解密数据不是有效的JSON: {str(e)}")
+            current_app.logger.error(f"解密结果前100个字符: {decrypted_json[:100]}")
+            raise ValueError(f"解密数据不是有效的JSON: {str(e)}")
         
         # 创建解密记录
         decrypted_record = encrypted_record.copy()
@@ -189,6 +261,7 @@ def decrypt_record(encrypted_record, encryption_key):
         # 标记为已解密
         decrypted_record['is_encrypted'] = False
         
+        current_app.logger.info("记录解密成功完成")
         return decrypted_record
         
     except Exception as e:

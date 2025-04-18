@@ -39,6 +39,12 @@ def create_institutions():
     """创建模拟医疗机构数据"""
     print("正在创建医疗机构数据...")
     
+    # 检查是否已存在机构数据
+    existing_count = Institution.query.count()
+    if existing_count > 0:
+        print(f"已存在 {existing_count} 个医疗机构记录，跳过创建...")
+        return
+    
     institutions = [
         {
             'name': '北京协和医院',
@@ -122,12 +128,6 @@ def create_institutions():
         }
     ]
     
-    # 检查是否已存在机构数据
-    existing_count = Institution.query.count()
-    if existing_count > 0:
-        print(f"已存在 {existing_count} 个医疗机构记录，跳过创建...")
-        return
-    
     # 创建机构数据
     for inst_data in institutions:
         institution = Institution(
@@ -149,6 +149,11 @@ def create_institutions():
 def create_record_types():
     """创建模拟记录类型数据"""
     print("正在创建记录类型数据...")
+    
+    # 获取现有记录类型的code列表，用于后面检查重复
+    existing_codes = [rt.code for rt in CustomRecordType.query.all()]
+    if existing_codes:
+        print(f"发现 {len(existing_codes)} 个现有记录类型代码")
     
     record_types = [
         {
@@ -227,17 +232,27 @@ def create_record_types():
             'description': '医生对患者的随访和复查记录',
             'color': '#096dd9',
             'icon': '🔄'
+        },
+        {
+            'code': 'PIR_DATA',
+            'name': 'PIR数据',
+            'description': 'PIR数据',
+            'color': '#096dd9',
+            'icon': '🔄'
         }
     ]
     
-    # 检查是否已存在记录类型数据
-    existing_count = CustomRecordType.query.count()
-    if existing_count > 0:
-        print(f"已存在 {existing_count} 个记录类型，跳过创建...")
-        return
-    
     # 创建记录类型数据
+    created_count = 0
+    skipped_count = 0
+    
     for type_data in record_types:
+        # 检查是否已存在该记录类型
+        if type_data['code'] in existing_codes:
+            print(f"记录类型 {type_data['code']} 已存在，跳过创建...")
+            skipped_count += 1
+            continue
+            
         record_type = CustomRecordType(
             code=type_data['code'],
             name=type_data['name'],
@@ -247,9 +262,14 @@ def create_record_types():
             is_active=True
         )
         db.session.add(record_type)
+        created_count += 1
     
-    db.session.commit()
-    print(f"成功创建 {len(record_types)} 个记录类型")
+    try:
+        db.session.commit()
+        print(f"成功创建 {created_count} 个记录类型，跳过 {skipped_count} 个已存在的记录类型")
+    except Exception as e:
+        db.session.rollback()
+        print(f"创建记录类型时发生错误: {str(e)}")
 
 def create_users():
     """创建模拟用户数据"""
@@ -638,9 +658,20 @@ def main():
     
     with app.app_context():
         # 按顺序创建各类数据
-        create_institutions()
-        create_record_types()
-        create_users()
+        try:
+            create_institutions()
+        except Exception as e:
+            print(f"创建医疗机构数据时发生错误: {str(e)}")
+        
+        try:
+            create_record_types()
+        except Exception as e:
+            print(f"创建记录类型数据时发生错误: {str(e)}")
+        
+        try:
+            create_users()
+        except Exception as e:
+            print(f"创建用户数据时发生错误: {str(e)}")
     
     print("模拟数据初始化完成！")
 

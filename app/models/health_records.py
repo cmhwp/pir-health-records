@@ -13,13 +13,6 @@ from functools import wraps
 class RecordType(str, enum.Enum):
     """健康记录类型枚举，值从数据库中的 CustomRecordType 获取"""
     # 设置基本类型，这些会被数据库中的值覆盖
-    MEDICAL_HISTORY = "medical_history"  # 病历
-    EXAMINATION = "examination"          # 检查报告
-    MEDICATION = "medication"            # 用药记录
-    VITAL_SIGNS = "vital_signs"          # 生命体征
-    TREATMENT = "treatment"              # 治疗记录
-    SURGERY = "surgery"                  # 手术记录
-    OTHER = "other"                      # 其他
     
     @classmethod
     def get_from_db(cls):
@@ -147,15 +140,19 @@ class HealthRecord(db.Model):
         else:
             record_date = datetime.now()
             
+        # 确保加密状态正确传递
+        is_encrypted = mongo_doc.get('is_encrypted', False)
+            
         # 创建健康记录索引
         record = HealthRecord(
             patient_id=mongo_doc.get('patient_id'),
+            doctor_id=mongo_doc.get('doctor_id'),
             record_type=record_type,
             title=mongo_doc.get('title', ''),
             record_date=record_date,
             visibility=visibility,
             mongo_id=str(mongo_doc.get('_id')),
-            is_encrypted=mongo_doc.get('is_encrypted', False)
+            is_encrypted=is_encrypted
         )
         
         return record

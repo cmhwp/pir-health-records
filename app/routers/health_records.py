@@ -97,6 +97,26 @@ def save_uploaded_file(file):
         }
     return None
 
+def format_mongo_date(date_value):
+    """处理MongoDB中的日期值，可能是字符串、datetime对象或包含$date的字典"""
+    if not date_value:
+        return None
+    
+    # 如果是datetime对象，直接格式化
+    if hasattr(date_value, 'isoformat'):
+        return date_value.isoformat()
+    
+    # 如果是字典格式的日期（MongoDB $date格式）
+    if isinstance(date_value, dict) and '$date' in date_value:
+        return date_value['$date']
+    
+    # 如果已经是字符串，直接返回
+    if isinstance(date_value, str):
+        return date_value
+    
+    # 其他情况，转换为字符串
+    return str(date_value)
+
 # 创建健康记录
 @health_bp.route('/records', methods=['POST'])
 @login_required
@@ -112,6 +132,9 @@ def create_health_record():
                 'message': '缺少必要字段 (title, record_type)'
             }), 400
         
+        # 确保患者ID正确
+        record_data['patient_id'] = current_user.id
+            
         # 处理上传的文件
         file_info = []
         files = request.files.getlist('files')
@@ -127,6 +150,24 @@ def create_health_record():
                     'uploaded_at': datetime.now().isoformat()
                 })
         
+        # 检查是否需要加密记录
+        encryption_key = request.form.get('encryption_key')
+        if encryption_key:
+            # 导入加密工具
+            from ..utils.encryption_utils import encrypt_record, verify_record_integrity
+            
+            # 明确设置加密标志
+            record_data['is_encrypted'] = True
+            
+            # 如果提供了加密密钥，则加密记录
+            record_data = encrypt_record(record_data, encryption_key)
+            
+            # 设置数据完整性验证
+            record_data['integrity_hash'] = verify_record_integrity(record_data)
+        else:
+            # 如果没有提供加密密钥，确保明确标记为未加密
+            record_data['is_encrypted'] = False
+        
         # 存储到MongoDB和MySQL (使用新的集成方法)
         record, mongo_id = HealthRecord.create_with_mongo(record_data, current_user.id, file_info)
         
@@ -138,7 +179,8 @@ def create_health_record():
                 file_path=file_data['file_path'],
                 file_type=file_data['file_type'],
                 file_size=file_data['file_size'],
-                description=file_data.get('description', '')
+                description=file_data.get('description', ''),
+                is_encrypted=bool(encryption_key)  # 设置文件加密状态
             )
             db.session.add(record_file)
         
@@ -151,6 +193,7 @@ def create_health_record():
                 'record_type': record_data.get('record_type'),
                 'title': record_data.get('title'),
                 'visibility': record_data.get('visibility', 'private'),
+                'is_encrypted': bool(encryption_key),
                 'file_count': len(file_info),
                 'creation_time': datetime.now().isoformat()
             }
@@ -297,19 +340,38 @@ def get_health_records():
 @login_required
 def get_health_record(record_id):
     try:
-        # 尝试转换为ObjectId
-        try:
-            mongo_id = format_mongo_id(record_id)
-            if not mongo_id:
+        mongo_id = None
+        sql_record = None
+        
+        # 检查是否是数字ID（SQL ID）
+        if record_id.isdigit():
+            current_app.logger.info(f"检测到数字ID: {record_id}，尝试从MySQL获取对应的记录")
+            sql_record = HealthRecord.query.get(int(record_id))
+            if sql_record and sql_record.mongo_id:
+                mongo_id = format_mongo_id(sql_record.mongo_id)
+                record_id = sql_record.mongo_id  # 更新record_id为mongo_id
+                current_app.logger.info(f"从MySQL找到对应的MongoDB ID: {record_id}")
+            else:
+                current_app.logger.error(f"MySQL中找不到ID为 {record_id} 的记录，或该记录没有关联的MongoDB ID")
                 return jsonify({
                     'success': False,
-                    'message': '无效的记录ID'
+                    'message': '记录不存在或未关联MongoDB数据'
+                }), 404
+        else:
+            # 尝试转换为ObjectId
+            try:
+                mongo_id = format_mongo_id(record_id)
+                if not mongo_id:
+                    return jsonify({
+                        'success': False,
+                        'message': '无效的记录ID格式'
+                    }), 400
+            except Exception as e:
+                current_app.logger.error(f"格式化MongoDB ID失败: {str(e)}")
+                return jsonify({
+                    'success': False,
+                    'message': '无效的记录ID格式'
                 }), 400
-        except:
-            return jsonify({
-                'success': False,
-                'message': '无效的记录ID'
-            }), 400
         
         # 使用缓存函数获取MongoDB记录
         record_data = get_mongo_health_record(record_id)
@@ -328,17 +390,18 @@ def get_health_record(record_id):
                 'message': error_msg
             }), 403
         
-        # 查找或创建MySQL中的索引记录
-        sql_record = HealthRecord.query.filter_by(mongo_id=record_id).first()
-        
+        # 如果之前没有获取SQL记录，尝试查找或创建MySQL中的索引记录
         if not sql_record:
-            # 如果MySQL中没有记录，则同步创建
-            mongo_db = get_mongo_db()
-            mongo_record = mongo_db.health_records.find_one({'_id': mongo_id})
-            if mongo_record:
-                sql_record = HealthRecord.from_mongo_doc(mongo_record)
-                db.session.add(sql_record)
-                db.session.commit()
+            sql_record = HealthRecord.query.filter_by(mongo_id=record_id).first()
+            
+            if not sql_record:
+                # 如果MySQL中没有记录，则同步创建
+                mongo_db = get_mongo_db()
+                mongo_record = mongo_db.health_records.find_one({'_id': mongo_id})
+                if mongo_record:
+                    sql_record = HealthRecord.from_mongo_doc(mongo_record)
+                    db.session.add(sql_record)
+                    db.session.commit()
         
         # 记录查询历史
         is_anonymous = request.args.get('anonymous', 'false').lower() == 'true'
@@ -366,11 +429,23 @@ def get_health_record(record_id):
             'query_time': datetime.now()
         })
         
+        # 检查记录是否加密
+        is_encrypted = record_data.get('is_encrypted', False)
+        requires_decryption = is_encrypted and 'encrypted_data' in record_data
+        
+        # 如果记录加密且未包含敏感数据，添加提示信息
+        message = '记录获取成功'
+        if requires_decryption:
+            message = '记录已加密，需要提供解密密钥查看完整内容'
+        
         return jsonify({
             'success': True,
+            'message': message,
             'data': {
                 'record': record_data,
-                'sql_id': sql_record.id if sql_record else None
+                'sql_id': sql_record.id if sql_record else None,
+                'is_encrypted': is_encrypted,
+                'requires_decryption': requires_decryption
             }
         })
     except Exception as e:
@@ -1219,7 +1294,7 @@ def get_records_shared_by_me():
                 'record_info': {
                     'title': mongo_record['title'] if mongo_record else None,
                     'record_type': mongo_record['record_type'] if mongo_record else None,
-                    'record_date': mongo_record['record_date'].isoformat() if mongo_record and 'record_date' in mongo_record and isinstance(mongo_record['record_date'], datetime) else None
+                    'record_date': format_mongo_date(mongo_record.get('record_date')) if mongo_record else None
                 }
             }
             result.append(record_info)
@@ -1301,8 +1376,8 @@ def get_records_shared_with_me():
                 'record_info': {
                     'title': health_record.title if health_record else (mongo_record.get('title') if mongo_record else None),
                     'record_type': health_record.record_type.value if health_record else (mongo_record.get('record_type') if mongo_record else None),
-                    'record_date': health_record.record_date.isoformat() if health_record and health_record.record_date else (
-                        mongo_record.get('record_date') if mongo_record and 'record_date' in mongo_record else None
+                    'record_date': format_mongo_date(health_record.record_date) if health_record and health_record.record_date else (
+                        format_mongo_date(mongo_record.get('record_date')) if mongo_record else None
                     )
                 }
             }
@@ -2580,7 +2655,7 @@ def get_record_versions(record_id):
                 
             version_info = {
                 'version': version.get('version'),
-                'created_at': version.get('created_at'),
+                'created_at': format_mongo_date(version.get('created_at')),
                 'description': version.get('description', ''),
                 'creator': {
                     'id': creator.id if creator else None,
@@ -2641,9 +2716,14 @@ def create_record_version(record_id):
         # 从MongoDB获取记录
         from bson.objectid import ObjectId
         
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        
         try:
-            record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
-        except:
+            mongo_id = ObjectId(record_id)
+            record = mongo_db.health_records.find_one({'_id': mongo_id})
+        except Exception as e:
+            current_app.logger.error(f"获取记录失败: {str(e)}")
             return jsonify({
                 'success': False,
                 'message': '无效的记录ID'
@@ -2743,17 +2823,39 @@ def create_record_version(record_id):
         version_history.append(version_entry)
         update_fields['version_history'] = version_history
         
+        # 在执行更新之前，保存当前版本的快照
+        current_app.logger.info(f"正在为记录 {record_id} 创建版本 {current_version} 的快照")
+        
+        # 创建一个当前记录的副本用于版本快照
+        version_snapshot = record.copy()
+        
+        # 保存版本信息
+        version_snapshot['record_id'] = str(record['_id'])  # 添加原始记录ID的引用
+        version_snapshot['_id'] = ObjectId()  # 生成新的ID
+        version_snapshot['version'] = current_version  # 当前版本号
+        version_snapshot['snapshot_date'] = datetime.now()
+        
+        # 保存快照到versions集合
+        try:
+            mongo_db.health_records_versions.insert_one(version_snapshot)
+            current_app.logger.info(f"已创建记录 {record_id} 版本 {current_version} 的快照")
+        except Exception as e:
+            current_app.logger.error(f"创建版本快照失败: {str(e)}")
+            # 继续执行，不阻止更新主记录
+        
         # 执行更新
-        mongo.db.health_records.update_one(
-            {'_id': ObjectId(record_id)},
+        current_app.logger.info(f"更新记录 {record_id} 到新版本 {new_version}")
+        mongo_db.health_records.update_one(
+            {'_id': mongo_id},
             {'$set': update_fields}
         )
         
         # 获取更新后的记录
-        updated_record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
+        updated_record = mongo_db.health_records.find_one({'_id': mongo_id})
         
         # 使用通用函数处理记录
-        record_data = mongo_health_record_to_dict(updated_record)
+        from ..utils.mongo_utils import format_mongo_doc
+        record_data = format_mongo_doc(updated_record)
         
         return jsonify({
             'success': True,
@@ -2780,15 +2882,23 @@ def get_record_version(record_id, version_number):
         # 从MongoDB获取记录
         from bson.objectid import ObjectId
         
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        
+        current_app.logger.info(f"正在获取记录 {record_id} 的版本 {version_number}")
+        
         try:
-            record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
-        except:
+            mongo_id = ObjectId(record_id)
+            record = mongo_db.health_records.find_one({'_id': mongo_id})
+        except Exception as e:
+            current_app.logger.error(f"获取记录失败: {str(e)}")
             return jsonify({
                 'success': False,
                 'message': '无效的记录ID'
             }), 400
             
         if not record:
+            current_app.logger.error(f"找不到记录 {record_id}")
             return jsonify({
                 'success': False,
                 'message': '记录不存在'
@@ -2805,7 +2915,9 @@ def get_record_version(record_id, version_number):
         # 如果请求的是当前版本，直接返回
         current_version = record.get('version', 1)
         if version_number == current_version:
-            record_data = mongo_health_record_to_dict(record)
+            # 使用通用函数处理记录
+            from ..utils.mongo_utils import format_mongo_doc
+            record_data = format_mongo_doc(record)
             return jsonify({
                 'success': True,
                 'data': {
@@ -2826,43 +2938,78 @@ def get_record_version(record_id, version_number):
                 break
                 
         if not version_info:
+            current_app.logger.error(f"版本历史中找不到版本 {version_number}")
             return jsonify({
                 'success': False,
                 'message': f'版本 {version_number} 不存在'
             }), 404
             
         # 获取版本快照
-        version_record = mongo.db.health_records_versions.find_one({
+        version_record = mongo_db.health_records_versions.find_one({
             'record_id': str(record['_id']),
             'version': version_number
         })
         
         if not version_record:
-            # 如果没有找到版本快照，返回错误
-            return jsonify({
-                'success': False,
-                'message': f'版本 {version_number} 的快照不存在'
-            }), 404
+            current_app.logger.error(f"找不到版本 {version_number} 的快照")
             
-        # 处理记录数据
-        version_record_data = mongo_health_record_to_dict(version_record)
+            # 自动修复：创建一个估计的版本快照
+            try:
+                # 获取对应的版本条目信息
+                version_info = None
+                for version in version_history:
+                    if version.get('version') == version_number:
+                        version_info = version
+                        break
+                
+                if version_info:
+                    current_app.logger.info(f"尝试为记录 {record_id} 自动创建版本 {version_number} 的估计快照")
+                    
+                    # 基于当前记录创建一个估计的快照
+                    snapshot = record.copy()
+                    snapshot['record_id'] = str(record['_id'])
+                    snapshot['_id'] = ObjectId()
+                    snapshot['version'] = version_number
+                    snapshot['snapshot_date'] = datetime.now()
+                    snapshot['is_estimated'] = True  # 标记为估计的快照
+                    
+                    # 调整版本历史
+                    if 'version_history' in snapshot:
+                        history_copy = [h for h in snapshot['version_history'] 
+                                       if h.get('version') <= version_number]
+                        snapshot['version_history'] = history_copy
+                    
+                    # 保存快照
+                    mongo_db.health_records_versions.insert_one(snapshot)
+                    current_app.logger.info(f"为记录 {record_id} 创建了版本 {version_number} 的估计快照")
+                    
+                    # 使用新创建的快照作为版本记录
+                    version_record = snapshot
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': f'版本 {version_number} 的快照不存在，且无法自动创建'
+                    }), 404
+                    
+            except Exception as e:
+                current_app.logger.error(f"自动创建版本快照失败: {str(e)}")
+                return jsonify({
+                    'success': False,
+                    'message': f'版本 {version_number} 的快照不存在，自动创建失败: {str(e)}'
+                }), 404
+            
+        # 处理版本记录
+        from ..utils.mongo_utils import format_mongo_doc
+        version_data = format_mongo_doc(version_record)
         
-        # 记录查询历史
-        mongo.db.query_history.insert_one({
-            'user_id': current_user.id,
-            'record_id': record_id,
-            'query_type': 'version_view',
-            'is_anonymous': False,
-            'query_params': {'version': version_number},
-            'query_time': datetime.now() 
-        })
+        # 添加版本信息
+        version_data['version_info'] = version_info
         
         return jsonify({
             'success': True,
             'data': {
-                'record': version_record_data,
+                'record': version_data,
                 'version': version_number,
-                'version_info': version_info,
                 'is_current': False,
                 'current_version': current_version
             }
@@ -2883,15 +3030,23 @@ def restore_record_version(record_id, version_number):
         # 从MongoDB获取记录
         from bson.objectid import ObjectId
         
+        current_app.logger.info(f"尝试恢复记录 {record_id} 到版本 {version_number}")
+        
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        
         try:
-            record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
-        except:
+            mongo_id = ObjectId(record_id)
+            record = mongo_db.health_records.find_one({'_id': mongo_id})
+        except Exception as e:
+            current_app.logger.error(f"获取记录失败: {str(e)}")
             return jsonify({
                 'success': False,
                 'message': '无效的记录ID'
             }), 400
             
         if not record:
+            current_app.logger.error(f"找不到记录 {record_id}")
             return jsonify({
                 'success': False,
                 'message': '记录不存在'
@@ -2923,19 +3078,21 @@ def restore_record_version(record_id, version_number):
                 break
                 
         if not version_exists:
+            current_app.logger.error(f"版本历史中找不到版本 {version_number}")
             return jsonify({
                 'success': False,
                 'message': f'版本 {version_number} 不存在'
             }), 404
             
         # 获取版本快照
-        version_record = mongo.db.health_records_versions.find_one({
+        version_record = mongo_db.health_records_versions.find_one({
             'record_id': str(record['_id']),
             'version': version_number
         })
         
         if not version_record:
             # 如果没有找到版本快照，返回错误
+            current_app.logger.error(f"找不到版本 {version_number} 的快照")
             return jsonify({
                 'success': False,
                 'message': f'版本 {version_number} 的快照不存在'
@@ -2970,17 +3127,20 @@ def restore_record_version(record_id, version_number):
         restore_data['version_history'] = version_history
         
         # 执行更新
-        mongo.db.health_records.update_one(
-            {'_id': ObjectId(record_id)},
+        current_app.logger.info(f"更新记录 {record_id} 到新版本 {new_version}")
+        mongo_db.health_records.update_one(
+            {'_id': mongo_id},
             {'$set': restore_data}
         )
         
         # 获取更新后的记录
-        updated_record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
+        updated_record = mongo_db.health_records.find_one({'_id': mongo_id})
         
         # 使用通用函数处理记录
-        record_data = mongo_health_record_to_dict(updated_record)
+        from ..utils.mongo_utils import format_mongo_doc
+        record_data = format_mongo_doc(updated_record)
         
+        current_app.logger.info(f"成功恢复记录 {record_id} 到版本 {version_number}")
         return jsonify({
             'success': True,
             'message': f'成功恢复到版本 {version_number}',
@@ -2996,627 +3156,6 @@ def restore_record_version(record_id, version_number):
         return jsonify({
             'success': False,
             'message': f'恢复记录版本失败: {str(e)}'
-        }), 500
-
-# 增强的安全删除功能（符合GDPR要求）
-@health_bp.route('/records/<record_id>/secure-delete', methods=['DELETE'])
-@login_required
-def secure_delete_health_record(record_id):
-    try:
-        # 从MongoDB获取记录
-        from bson.objectid import ObjectId
-        
-        try:
-            record = mongo.db.health_records.find_one({'_id': ObjectId(record_id)})
-        except:
-            return jsonify({
-                'success': False,
-                'message': '无效的记录ID'
-            }), 400
-            
-        if not record:
-            return jsonify({
-                'success': False,
-                'message': '记录不存在'
-            }), 404
-        
-        # 检查是否有权限删除（只有患者自己或管理员可以删除）
-        if str(record['patient_id']) != str(current_user.id) and not current_user.has_role(Role.ADMIN):
-            return jsonify({
-                'success': False,
-                'message': '没有权限删除此记录'
-            }), 403
-            
-        # 获取删除原因和是否保留备份
-        data = request.json or {}
-        deletion_reason = data.get('reason', '用户请求删除')
-        create_backup = data.get('create_backup', False)
-        
-        # 如果需要创建备份
-        if create_backup:
-            # 创建记录备份
-            backup_record = record.copy()
-            backup_record['original_id'] = str(record['_id'])
-            backup_record['deletion_time'] = datetime.now()
-            backup_record['deletion_reason'] = deletion_reason
-            backup_record['deleted_by'] = current_user.id
-            
-            # 存储备份
-            mongo.db.health_records_deleted.insert_one(backup_record)
-        
-        # 删除所有版本记录
-        mongo.db.health_records_versions.delete_many({'record_id': str(record['_id'])})
-        
-        # 删除相关物理文件
-        if 'files' in record and record['files']:
-            for file in record['files']:
-                file_path = os.path.join(UPLOAD_FOLDER, file.get('file_path'))
-                if os.path.exists(file_path):
-                    # 安全覆写文件内容后删除
-                    with open(file_path, 'wb') as f:
-                        # 用随机数据覆写文件
-                        file_size = os.path.getsize(file_path)
-                        f.write(os.urandom(file_size))
-                    # 删除文件
-                    os.remove(file_path)
-        
-        # 记录删除操作（合规审计）
-        mongo.db.data_deletion_log.insert_one({
-            'record_id': str(record['_id']),
-            'user_id': current_user.id,
-            'deletion_time': datetime.now(),
-            'reason': deletion_reason,
-            'backup_created': create_backup,
-            'record_type': record.get('record_type'),
-            'record_title': record.get('title')
-        })
-        
-        # 删除共享记录
-        SharedRecord.query.filter_by(record_id=str(record['_id'])).delete()
-        db.session.commit()
-        
-        # 删除MongoDB记录
-        mongo.db.health_records.delete_one({'_id': ObjectId(record_id)})
-        
-        # 删除相关查询历史
-        mongo.db.query_history.delete_many({'record_id': record_id})
-        
-        return jsonify({
-            'success': True,
-            'message': '健康记录安全删除成功',
-            'data': {
-                'backup_created': create_backup,
-                'deletion_time': datetime.now().isoformat()
-            }
-        })
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"安全删除健康记录失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'安全删除健康记录失败: {str(e)}'
-        }), 500
-
-# 获取已删除记录列表（仅管理员可访问）
-@health_bp.route('/records/deleted', methods=['GET'])
-@login_required
-@role_required(Role.ADMIN)
-def get_deleted_records():
-    try:
-        # 分页参数
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 10, type=int)
-        
-        # 查询条件
-        query = {}
-        
-        # 按患者ID过滤
-        if 'patient_id' in request.args:
-            query['patient_id'] = int(request.args.get('patient_id'))
-            
-        # 按日期范围过滤
-        if 'start_date' in request.args:
-            try:
-                start_date = datetime.fromisoformat(request.args.get('start_date'))
-                if 'date_filter' not in query:
-                    query['deletion_time'] = {}
-                query['deletion_time']['$gte'] = start_date
-            except ValueError:
-                pass
-                
-        if 'end_date' in request.args:
-            try:
-                end_date = datetime.fromisoformat(request.args.get('end_date'))
-                if 'deletion_time' not in query:
-                    query['deletion_time'] = {}
-                query['deletion_time']['$lte'] = end_date
-            except ValueError:
-                pass
-        
-        # 执行查询
-        total = mongo.db.health_records_deleted.count_documents(query)
-        
-        # 获取分页数据
-        skip = (page - 1) * per_page
-        cursor = mongo.db.health_records_deleted.find(query).sort('deletion_time', -1).skip(skip).limit(per_page)
-        
-        # 处理记录数据
-        deleted_records = []
-        for record in cursor:
-            # 转换为字典格式
-            record_dict = mongo_health_record_to_dict(record)
-            
-            # 添加删除相关信息
-            record_dict['deletion_time'] = record.get('deletion_time').isoformat() if 'deletion_time' in record and isinstance(record.get('deletion_time'), datetime) else None
-            record_dict['deletion_reason'] = record.get('deletion_reason')
-            
-            # 获取删除者信息
-            deleter_id = record.get('deleted_by')
-            if deleter_id:
-                deleter = User.query.get(deleter_id)
-                if deleter:
-                    record_dict['deleted_by'] = {
-                        'id': deleter.id,
-                        'username': deleter.username
-                    }
-                    
-            deleted_records.append(record_dict)
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'deleted_records': deleted_records,
-                'total': total,
-                'pages': math.ceil(total / per_page),
-                'current_page': page
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"获取已删除记录失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取已删除记录失败: {str(e)}'
-        }), 500
-
-# 获取用户健康记录综合摘要 (使用MySQL和MongoDB)
-@health_bp.route('/summary', methods=['GET'])
-@login_required
-@role_required(Role.PATIENT)
-def get_health_summary():
-    try:
-        # 从MySQL获取查询历史统计
-        mysql_query_history = QueryHistory.query.filter_by(
-            user_id=current_user.id
-        ).order_by(desc(QueryHistory.query_time)).limit(5).all()
-        
-        # 从MySQL获取共享记录统计
-        mysql_shared_records = SharedRecord.query.filter_by(
-            owner_id=current_user.id
-        ).all()
-        
-        # 从MongoDB获取最近健康记录
-        mongo_query = {'patient_id': current_user.id}
-        mongo_records, _ = query_health_records_mongodb(
-            mongo_query, 
-            current_user.id, 
-            is_anonymous=False
-        )
-        
-        # 只获取最近5条记录并转换格式
-        recent_records = mongo_records[:5]
-        formatted_records = [mongo_health_record_to_dict(record) for record in recent_records]
-        
-        # 计算MongoDB中的记录类型统计
-        record_type_stats = {}
-        mongo_record_types = mongo.db.health_records.aggregate([
-            {'$match': {'patient_id': current_user.id}},
-            {'$group': {'_id': '$record_type', 'count': {'$sum': 1}}}
-        ])
-        
-        for stat in mongo_record_types:
-            record_type_stats[stat['_id']] = stat['count']
-        
-        # 记录查询操作到MongoDB
-        mongo.db.query_history.insert_one({
-            'user_id': current_user.id,
-            'query_type': 'health_summary',
-            'is_anonymous': False,
-            'query_params': {},
-            'query_time': datetime.now()
-        })
-        
-        # 组合返回结果
-        return jsonify({
-            'success': True,
-            'data': {
-                'recent_records': formatted_records,
-                'record_count': len(mongo_records),
-                'record_type_stats': record_type_stats,
-                'recent_queries': [query.to_dict() for query in mysql_query_history],
-                'shared_records_count': len(mysql_shared_records),
-                'active_shares': len([s for s in mysql_shared_records if s.is_valid()])
-            }
-        }), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"获取健康摘要失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取健康摘要失败: {str(e)}'
-        }), 500
-
-# 获取用户健康记录综合分析 (使用MySQL和MongoDB数据)
-@health_bp.route('/analytics', methods=['GET'])
-@login_required
-@role_required(Role.PATIENT)
-def get_health_analytics():
-    try:
-        # 从MongoDB获取健康记录按类型统计
-        record_type_stats = {}
-        mongo_record_types = mongo.db.health_records.aggregate([
-            {'$match': {'patient_id': current_user.id}},
-            {'$group': {'_id': '$record_type', 'count': {'$sum': 1}}}
-        ])
-        
-        for stat in mongo_record_types:
-            record_type_stats[stat['_id']] = stat['count']
-        
-        # 从MongoDB获取健康记录按时间统计
-        time_period = request.args.get('period', 'month')
-        
-        # 根据时间段确定时间范围
-        if time_period == 'week':
-            start_date = datetime.now() - timedelta(days=7)
-            group_format = '%Y-%m-%d'
-        elif time_period == 'month':
-            start_date = datetime.now() - timedelta(days=30)
-            group_format = '%Y-%m-%d'
-        elif time_period == 'year':
-            start_date = datetime.now() - timedelta(days=365)
-            group_format = '%Y-%m'
-        else:
-            start_date = datetime.now() - timedelta(days=30)
-            group_format = '%Y-%m-%d'
-        
-        # 从MongoDB获取时间序列数据
-        timeline_records = mongo.db.health_records.aggregate([
-            {
-                '$match': {
-                    'patient_id': current_user.id,
-                    'record_date': {'$gte': start_date}
-                }
-            },
-            {
-                '$project': {
-                    'date_string': {'$dateToString': {'format': group_format, 'date': '$record_date'}},
-                    'record_type': 1
-                }
-            },
-            {
-                '$group': {
-                    '_id': {
-                        'date': '$date_string',
-                        'type': '$record_type'
-                    },
-                    'count': {'$sum': 1}
-                }
-            },
-            {'$sort': {'_id.date': 1}}
-        ])
-        
-        # 格式化时间序列数据
-        timeline_data = {}
-        for record in timeline_records:
-            date = record['_id']['date']
-            record_type = record['_id']['type']
-            count = record['count']
-            
-            if date not in timeline_data:
-                timeline_data[date] = {}
-            
-            timeline_data[date][record_type] = count
-        
-        # 从MySQL获取查询历史统计
-        query_stats = db.session.query(
-            QueryHistory.query_type,
-            func.count(QueryHistory.id).label('count')
-        ).filter_by(
-            user_id=current_user.id
-        ).group_by(
-            QueryHistory.query_type
-        ).all()
-        
-        query_stats_dict = {stat[0]: stat[1] for stat in query_stats}
-        
-        # 从MySQL获取文件统计
-        file_stats = db.session.query(
-            RecordFile.file_type,
-            func.count(RecordFile.id).label('count'),
-            func.sum(RecordFile.file_size).label('total_size')
-        ).join(
-            HealthRecord, HealthRecord.id == RecordFile.record_id
-        ).filter(
-            HealthRecord.patient_id == current_user.id
-        ).group_by(
-            RecordFile.file_type
-        ).all()
-        
-        file_stats_dict = {
-            stat[0]: {'count': stat[1], 'total_size': stat[2]} 
-            for stat in file_stats
-        }
-        
-        # 将分析操作记录到MongoDB
-        mongo.db.query_history.insert_one({
-            'user_id': current_user.id,
-            'query_type': 'health_analytics',
-            'is_anonymous': False,
-            'query_params': {'period': time_period},
-            'query_time': datetime.now()
-        })
-        
-        # 组合返回结果
-        return jsonify({
-            'success': True,
-            'data': {
-                'record_types': record_type_stats,
-                'timeline': timeline_data,
-                'query_statistics': query_stats_dict,
-                'file_statistics': file_stats_dict,
-                'period': time_period
-            }
-        }), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"获取健康分析失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取健康分析失败: {str(e)}'
-        }), 500
-
-# 同步MongoDB与MySQL数据库之间的健康记录
-@health_bp.route('/sync', methods=['POST'])
-@login_required
-@role_required(Role.PATIENT)
-def sync_health_records():
-    try:
-        sync_type = request.json.get('sync_type', 'mongo_to_mysql')
-        record_id = request.json.get('record_id')
-        
-        # 验证是否提供了记录ID
-        if not record_id:
-            return jsonify({
-                'success': False,
-                'message': '需要提供记录ID'
-            }), 400
-        
-        # 从MongoDB同步到MySQL
-        if sync_type == 'mongo_to_mysql':
-            # 从MongoDB获取记录
-            mongo_record = mongo.db.health_records.find_one({
-                '_id': ObjectId(record_id),
-                'patient_id': current_user.id
-            })
-            
-            if not mongo_record:
-                return jsonify({
-                    'success': False,
-                    'message': '在MongoDB中未找到指定的健康记录'
-                }), 404
-            
-            # 将MongoDB记录转换为MySQL模型
-            mysql_record = HealthRecord.from_mongo_doc(mongo_record)
-            
-            # 检查MySQL中是否已存在该记录
-            existing_record = HealthRecord.query.filter_by(
-                patient_id=current_user.id
-            ).filter(
-                HealthRecord.mongo_id == record_id
-            ).first()
-            
-            # 如果存在则更新，否则创建新记录
-            if existing_record:
-                # 更新现有记录的字段
-                existing_record.record_type = mysql_record.record_type
-                existing_record.title = mysql_record.title
-                existing_record.description = mysql_record.description
-                existing_record.record_date = mysql_record.record_date
-                existing_record.institution = mysql_record.institution
-                existing_record.doctor_name = mysql_record.doctor_name
-                existing_record.visibility = mysql_record.visibility
-                existing_record.tags = mysql_record.tags
-                existing_record.data = mysql_record.data
-                existing_record.updated_at = datetime.now()
-                
-                # 同步文件信息
-                if 'files' in mongo_record and mongo_record['files']:
-                    # 先清除所有现有文件
-                    for file in existing_record.files:
-                        db.session.delete(file)
-                    
-                    # 添加来自MongoDB的文件
-                    for file_info in mongo_record['files']:
-                        record_file = RecordFile(
-                            record_id=existing_record.id,
-                            file_name=file_info.get('file_name', ''),
-                            file_path=file_info.get('file_path', ''),
-                            file_type=file_info.get('file_type', ''),
-                            file_size=file_info.get('file_size', 0),
-                            description=file_info.get('description', ''),
-                            uploaded_at=datetime.now()
-                        )
-                        db.session.add(record_file)
-                
-                db.session.commit()
-                mysql_id = existing_record.id
-                operation = "updated"
-            else:
-                # 添加新记录到MySQL
-                db.session.add(mysql_record)
-                db.session.flush()
-                
-                # 添加文件信息
-                if 'files' in mongo_record and mongo_record['files']:
-                    for file_info in mongo_record['files']:
-                        record_file = RecordFile(
-                            record_id=mysql_record.id,
-                            file_name=file_info.get('file_name', ''),
-                            file_path=file_info.get('file_path', ''),
-                            file_type=file_info.get('file_type', ''),
-                            file_size=file_info.get('file_size', 0),
-                            description=file_info.get('description', ''),
-                            uploaded_at=datetime.now()
-                        )
-                        db.session.add(record_file)
-                
-                db.session.commit()
-                mysql_id = mysql_record.id
-                operation = "created"
-            
-            # 记录同步操作
-            mongo.db.sync_history.insert_one({
-                'user_id': current_user.id,
-                'mongo_id': record_id,
-                'mysql_id': mysql_id,
-                'sync_type': 'mongo_to_mysql',
-                'operation': operation,
-                'sync_time': datetime.now()
-            })
-            
-            return jsonify({
-                'success': True,
-                'message': f'健康记录成功从MongoDB同步到MySQL ({operation})',
-                'data': {
-                    'mongo_id': record_id,
-                    'mysql_id': mysql_id,
-                    'operation': operation
-                }
-            }), 200
-            
-        # 从MySQL同步到MongoDB
-        elif sync_type == 'mysql_to_mongo':
-            # 从MySQL获取记录
-            mysql_record = HealthRecord.query.filter_by(
-                id=record_id,
-                patient_id=current_user.id
-            ).first()
-            
-            if not mysql_record:
-                return jsonify({
-                    'success': False,
-                    'message': '在MySQL中未找到指定的健康记录'
-                }), 404
-            
-            # 准备MongoDB记录数据
-            mongo_data = {
-                'patient_id': mysql_record.patient_id,
-                'record_type': mysql_record.record_type.value,
-                'title': mysql_record.title,
-                'description': mysql_record.description,
-                'record_date': mysql_record.record_date,
-                'institution': mysql_record.institution,
-                'doctor_name': mysql_record.doctor_name,
-                'visibility': mysql_record.visibility.value,
-                'tags': mysql_record.tags,
-                'data': mysql_record.data,
-                'created_at': mysql_record.created_at,
-                'updated_at': datetime.now()
-            }
-            
-            # 添加文件信息
-            if mysql_record.files:
-                file_info = []
-                for file in mysql_record.files:
-                    file_info.append({
-                        'file_name': file.file_name,
-                        'file_path': file.file_path,
-                        'file_type': file.file_type,
-                        'file_size': file.file_size,
-                        'description': file.description,
-                        'uploaded_at': file.uploaded_at.isoformat() if file.uploaded_at else datetime.now().isoformat()
-                    })
-                mongo_data['files'] = file_info
-            
-            # 检查MongoDB中是否已有该记录
-            existing_mongo_id = mysql_record.mongo_id
-            
-            if existing_mongo_id:
-                # 更新现有MongoDB记录
-                mongo.db.health_records.update_one(
-                    {'_id': ObjectId(existing_mongo_id)},
-                    {'$set': mongo_data}
-                )
-                mongo_id = existing_mongo_id
-                operation = "updated"
-            else:
-                # 创建新的MongoDB记录
-                result = mongo.db.health_records.insert_one(mongo_data)
-                mongo_id = str(result.inserted_id)
-                
-                # 更新MySQL记录中的mongo_id引用
-                mysql_record.mongo_id = mongo_id
-                db.session.commit()
-                
-                operation = "created"
-            
-            # 记录同步操作
-            mongo.db.sync_history.insert_one({
-                'user_id': current_user.id,
-                'mongo_id': mongo_id,
-                'mysql_id': record_id,
-                'sync_type': 'mysql_to_mongo',
-                'operation': operation,
-                'sync_time': datetime.now()
-            })
-            
-            return jsonify({
-                'success': True,
-                'message': f'健康记录成功从MySQL同步到MongoDB ({operation})',
-                'data': {
-                    'mongo_id': mongo_id,
-                    'mysql_id': record_id,
-                    'operation': operation
-                }
-            }), 200
-            
-        else:
-            return jsonify({
-                'success': False,
-                'message': '不支持的同步类型'
-            }), 400
-            
-    except Exception as e:
-        current_app.logger.error(f"同步健康记录失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'同步健康记录失败: {str(e)}'
-        }), 500
-
-# 数据库同步（将MongoDB中的记录同步到MySQL）
-@health_bp.route('/sync/databases', methods=['POST'])
-@login_required
-@role_required(Role.ADMIN)
-def sync_databases():
-    try:
-        patient_id = request.json.get('patient_id') if request.json else None
-        limit = request.json.get('limit', 100) if request.json else 100
-        
-        # 调用同步函数
-        sync_count = sync_records_from_mongodb(patient_id, limit)
-        
-        return jsonify({
-            'success': True,
-            'message': f'数据库同步成功，共同步{sync_count}条记录',
-            'data': {
-                'sync_count': sync_count
-            }
-        })
-    except Exception as e:
-        current_app.logger.error(f"数据库同步失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'数据库同步失败: {str(e)}'
         }), 500
 
 # 批量更新记录可见性
@@ -3674,7 +3213,134 @@ def batch_update_visibility():
             'message': f'批量更新记录可见性失败: {str(e)}'
         }), 500
 
-# =========================== 记录共享功能 ===========================
+# 临时修复版本快照
+@health_bp.route('/admin/fix-missing-versions', methods=['POST'])
+@login_required
+@role_required(Role.ADMIN)
+def fix_missing_versions():
+    try:
+        record_id = request.json.get('record_id')
+        
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        
+        # 如果提供了特定记录ID，只修复该记录
+        if record_id:
+            try:
+                mongo_id = ObjectId(record_id)
+                records = [mongo_db.health_records.find_one({'_id': mongo_id})]
+                if not records[0]:
+                    return jsonify({
+                        'success': False,
+                        'message': '记录不存在'
+                    }), 404
+            except Exception as e:
+                current_app.logger.error(f"获取记录失败: {str(e)}")
+                return jsonify({
+                    'success': False,
+                    'message': '无效的记录ID'
+                }), 400
+        else:
+            # 获取所有有版本历史的记录
+            records = list(mongo_db.health_records.find(
+                {'version_history': {'$exists': True, '$ne': []}}
+            ))
+        
+        fixed_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        for record in records:
+            record_id = str(record['_id'])
+            version_history = record.get('version_history', [])
+            
+            if not version_history:
+                continue
+                
+            current_app.logger.info(f"处理记录 {record_id}，有 {len(version_history)} 个版本历史")
+            
+            # 获取已存在的版本快照
+            existing_snapshots = list(mongo_db.health_records_versions.find({'record_id': record_id}))
+            existing_versions = [snapshot.get('version') for snapshot in existing_snapshots]
+            
+            current_app.logger.info(f"记录 {record_id} 已有 {len(existing_snapshots)} 个版本快照")
+            
+            # 处理每个缺失的版本
+            for version_entry in version_history:
+                version_number = version_entry.get('version')
+                
+                # 跳过已存在快照的版本
+                if version_number in existing_versions:
+                    current_app.logger.info(f"跳过记录 {record_id} 的版本 {version_number}，快照已存在")
+                    skipped_count += 1
+                    continue
+                
+                # 如果是第一个版本，使用记录本身创建快照
+                if version_number == 1:
+                    try:
+                        # 创建快照
+                        snapshot = record.copy()
+                        snapshot['record_id'] = record_id
+                        snapshot['_id'] = ObjectId()
+                        snapshot['version'] = 1
+                        snapshot['snapshot_date'] = datetime.now()
+                        
+                        # 只保留初始版本时可能存在的字段
+                        if 'version_history' in snapshot:
+                            history_copy = [h for h in snapshot['version_history'] if h.get('version') == 1]
+                            snapshot['version_history'] = history_copy
+                            
+                        # 保存快照
+                        mongo_db.health_records_versions.insert_one(snapshot)
+                        current_app.logger.info(f"为记录 {record_id} 创建了版本 {version_number} 的快照")
+                        fixed_count += 1
+                    except Exception as e:
+                        current_app.logger.error(f"创建记录 {record_id} 的版本 {version_number} 快照失败: {str(e)}")
+                        error_count += 1
+                else:
+                    # 对于中间版本，我们无法确切知道那时的记录状态
+                    # 复制当前记录，但调整版本信息
+                    try:
+                        # 基于当前记录创建一个估计的快照
+                        snapshot = record.copy()
+                        snapshot['record_id'] = record_id
+                        snapshot['_id'] = ObjectId()
+                        snapshot['version'] = version_number
+                        snapshot['snapshot_date'] = datetime.now()
+                        snapshot['is_estimated'] = True  # 标记为估计的快照
+                        
+                        # 调整版本历史
+                        if 'version_history' in snapshot:
+                            history_copy = [h for h in snapshot['version_history'] 
+                                           if h.get('version') <= version_number]
+                            snapshot['version_history'] = history_copy
+                            
+                        # 保存快照
+                        mongo_db.health_records_versions.insert_one(snapshot)
+                        current_app.logger.info(f"为记录 {record_id} 创建了版本 {version_number} 的估计快照")
+                        fixed_count += 1
+                    except Exception as e:
+                        current_app.logger.error(f"创建记录 {record_id} 的版本 {version_number} 快照失败: {str(e)}")
+                        error_count += 1
+        
+        return jsonify({
+            'success': True,
+            'message': f'修复完成，共处理 {len(records)} 条记录',
+            'data': {
+                'fixed_count': fixed_count,
+                'skipped_count': skipped_count,
+                'error_count': error_count
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"修复版本快照失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'修复版本快照失败: {str(e)}'
+        }), 500
+
+# =========================== 用户共享功能 ===========================
 
 # 获取可共享的用户列表
 @health_bp.route('/share/users', methods=['GET'])
@@ -3732,13 +3398,13 @@ def get_shareable_users():
             }
             
             # 添加角色特定信息
-            if user.role == Role.DOCTOR and user.doctor_info:
+            if user.role == Role.DOCTOR and hasattr(user, 'doctor_info') and user.doctor_info:
                 user_data['doctor_info'] = {
                     'specialty': user.doctor_info.specialty,
                     'hospital': user.doctor_info.hospital,
                     'department': user.doctor_info.department
                 }
-            elif user.role == Role.PATIENT and user.patient_info:
+            elif user.role == Role.PATIENT and hasattr(user, 'patient_info') and user.patient_info:
                 user_data['patient_info'] = {
                     'gender': user.patient_info.gender
                 }
@@ -3824,7 +3490,7 @@ def get_sharable_user_detail(user_id):
         }
         
         # 添加角色特定信息
-        if user.role == Role.DOCTOR and user.doctor_info:
+        if user.role == Role.DOCTOR and hasattr(user, 'doctor_info') and user.doctor_info:
             user_data['doctor_info'] = {
                 'specialty': user.doctor_info.specialty,
                 'hospital': user.doctor_info.hospital,
@@ -3832,7 +3498,7 @@ def get_sharable_user_detail(user_id):
                 'years_of_experience': user.doctor_info.years_of_experience,
                 'bio': user.doctor_info.bio
             }
-        elif user.role == Role.PATIENT and user.patient_info:
+        elif user.role == Role.PATIENT and hasattr(user, 'patient_info') and user.patient_info:
             user_data['patient_info'] = {
                 'gender': user.patient_info.gender,
                 'address': user.patient_info.address
@@ -3975,4 +3641,138 @@ def get_record_types():
             'success': False,
             'message': '获取记录类型失败',
             'error': str(e)
+        }), 500
+
+# 解密健康记录
+@health_bp.route('/records/<record_id>/decrypt', methods=['POST'])
+@login_required
+def decrypt_health_record(record_id):
+    try:
+        # 获取解密密钥
+        encryption_key = request.json.get('encryption_key')
+        if not encryption_key:
+            return jsonify({
+                'success': False,
+                'message': '未提供解密密钥'
+            }), 400
+        
+        current_app.logger.info(f"尝试解密记录 {record_id}")
+        
+        # 从MongoDB获取记录
+        try:
+            mongo_id = format_mongo_id(record_id)
+            if not mongo_id:
+                return jsonify({
+                    'success': False,
+                    'message': '无效的记录ID'
+                }), 400
+        except Exception as e:
+            current_app.logger.error(f"格式化MongoDB ID失败: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': '无效的记录ID'
+            }), 400
+            
+        mongo_db = get_mongo_db()
+        record = mongo_db.health_records.find_one({'_id': mongo_id})
+        
+        if not record:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在'
+            }), 404
+        
+        # 检查是否有权限访问（只有患者自己或管理员可以访问）
+        if str(record['patient_id']) != str(current_user.id) and not current_user.has_role(Role.ADMIN):
+            return jsonify({
+                'success': False,
+                'message': '没有权限访问此记录'
+            }), 403
+        
+        # 检查记录是否已加密
+        if not record.get('is_encrypted', False):
+            return jsonify({
+                'success': False,
+                'message': '此记录未加密'
+            }), 400
+            
+        current_app.logger.info(f"记录加密状态确认: is_encrypted={record.get('is_encrypted')}")
+        
+        # 检查加密数据是否存在
+        if 'encrypted_data' not in record:
+            current_app.logger.error(f"记录缺少加密数据字段")
+            return jsonify({
+                'success': False,
+                'message': '记录格式无效，缺少加密数据'
+            }), 400
+        
+        # 检查加密盐值是否存在
+        if 'key_salt' not in record:
+            current_app.logger.error(f"记录缺少密钥盐值字段")
+            return jsonify({
+                'success': False,
+                'message': '记录格式无效，缺少密钥盐值'
+            }), 400
+        
+        # 导入解密工具和格式化工具
+        from ..utils.encryption_utils import decrypt_record, verify_record_integrity
+        from ..utils.mongo_utils import format_mongo_doc
+        
+        try:
+            # 使用增强的格式化函数将MongoDB文档转换为JSON可序列化的字典
+            record_dict = format_mongo_doc(record)
+            current_app.logger.info(f"记录格式化完成，准备解密")
+            
+            # 记录关键解密信息
+            current_app.logger.info(f"解密信息: key_salt存在={bool(record_dict.get('key_salt'))}, encrypted_data格式正确={isinstance(record_dict.get('encrypted_data'), dict)}")
+            
+            # 解密记录
+            decrypted_record = decrypt_record(record_dict, encryption_key)
+            current_app.logger.info(f"记录解密成功")
+            
+            # 验证记录完整性
+            if 'integrity_hash' in decrypted_record:
+                original_hash = decrypted_record['integrity_hash']
+                calculated_hash = verify_record_integrity(decrypted_record)
+                
+                hash_matched = original_hash == calculated_hash
+                current_app.logger.info(f"完整性验证: hash匹配={hash_matched}")
+                
+                integrity_warning = None
+                if not hash_matched:
+                    integrity_warning = "记录完整性验证失败，记录可能已被篡改，但仍然返回解密数据"
+                    current_app.logger.warning(integrity_warning)
+            else:
+                current_app.logger.info("记录中没有完整性哈希，跳过验证")
+                hash_matched = None
+                integrity_warning = None
+            
+            return jsonify({
+                'success': True,
+                'message': '记录解密成功',
+                'data': {
+                    'record': decrypted_record,
+                    'integrity_verified': hash_matched,
+                    'integrity_warning': integrity_warning
+                }
+            })
+            
+        except ValueError as e:
+            current_app.logger.error(f"解密记录值错误: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'解密失败: {str(e)}'
+            }), 400
+        except Exception as e:
+            current_app.logger.error(f"解密记录过程中发生未知错误: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'解密过程中发生错误: {str(e)}'
+            }), 400
+            
+    except Exception as e:
+        current_app.logger.error(f"解密健康记录失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'解密健康记录失败: {str(e)}'
         }), 500

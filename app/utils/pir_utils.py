@@ -301,7 +301,7 @@ def prepare_pir_database(health_records):
 
 def store_health_record_mongodb(record_data, patient_id, file_info=None):
     """
-    将健康记录存储到MongoDB
+    存储健康记录到MongoDB
     
     Args:
         record_data: 记录数据
@@ -311,22 +311,58 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     Returns:
         MongoDB中的记录ID
     """
+    from bson import ObjectId
+    from flask import current_app, g
+    from ..utils.mongo_utils import get_mongo_db
+    from datetime import datetime
+    import json
+    
+    # 获取MongoDB实例
+    mongo_db = get_mongo_db()
+    
+    # 转换记录类型、可见性和日期
+    record_visibility = record_data.get('visibility', 'private')
+    
+    # 处理日期
+    if 'record_date' in record_data and record_data['record_date']:
+        try:
+            record_date = datetime.strptime(record_data['record_date'], '%Y-%m-%dT%H:%M:%S.%f')
+        except ValueError:
+            try:
+                record_date = datetime.strptime(record_data['record_date'], '%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                record_date = datetime.now()
+    else:
+        record_date = datetime.now()
+    
+    # 确保is_encrypted标志存在，默认为False
+    is_encrypted = record_data.get('is_encrypted', False)
+    
     # 创建MongoDB记录
     mongo_record = {
         'patient_id': patient_id,
-        'record_type': record_data.get('record_type'),
-        'title': record_data.get('title'),
-        'description': record_data.get('description'),
-        'record_date': datetime.strptime(record_data.get('record_date', datetime.now().isoformat()), 
-                                          '%Y-%m-%dT%H:%M:%S.%f') if 'record_date' in record_data else datetime.now(),
-        'institution': record_data.get('institution'),
-        'doctor_name': record_data.get('doctor_name'),
-        'visibility': record_data.get('visibility', 'private'),
-        'tags': record_data.get('tags'),
-        'data': record_data.get('data'),
+        'doctor_id': record_data.get('doctor_id'),
+        'doctor_name': record_data.get('doctor_name', ''),
+        'record_type': record_data.get('record_type', ''),
+        'title': record_data.get('title', ''),
+        'description': record_data.get('description', ''),
+        'record_date': record_date,
+        'visibility': record_visibility,
+        'tags': record_data.get('tags', ''),
+        'institution': record_data.get('institution', ''),
         'created_at': datetime.now(),
-        'updated_at': datetime.now()
+        'updated_at': datetime.now(),
+        'is_encrypted': is_encrypted,   # 明确设置加密标志
+        'version': 1
     }
+    
+    # 如果记录是加密的，保存相关加密信息
+    if is_encrypted:
+        mongo_record['encrypted_data'] = record_data.get('encrypted_data')
+        mongo_record['key_salt'] = record_data.get('key_salt')
+        mongo_record['encryption_algorithm'] = record_data.get('encryption_algorithm')
+        mongo_record['encryption_date'] = record_data.get('encryption_date')
+        mongo_record['integrity_hash'] = record_data.get('integrity_hash')
     
     # 添加文件信息
     if file_info:
@@ -359,7 +395,7 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
             })
     
     # 插入记录
-    result = mongo.db.health_records.insert_one(mongo_record)
+    result = mongo_db.health_records.insert_one(mongo_record)
     
     return str(result.inserted_id)
 
@@ -446,23 +482,23 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
             for r in results:
                 r['_id'] = str(r['_id'])
                 if 'record_date' in r:
-                    r['record_date'] = r['record_date'].isoformat()
+                    r['record_date'] = r['record_date'].isoformat() if r['record_date'] and hasattr(r['record_date'], 'isoformat') else r['record_date']
                 if 'created_at' in r:
-                    r['created_at'] = r['created_at'].isoformat()
+                    r['created_at'] = r['created_at'].isoformat() if r['created_at'] and hasattr(r['created_at'], 'isoformat') else r['created_at']
                 if 'updated_at' in r:
-                    r['updated_at'] = r['updated_at'].isoformat()
+                    r['updated_at'] = r['updated_at'].isoformat() if r['updated_at'] and hasattr(r['updated_at'], 'isoformat') else r['updated_at']
                 
                 # 处理用药记录和生命体征的日期
                 if 'medication' in r and r['medication']:
                     if 'start_date' in r['medication'] and r['medication']['start_date']:
-                        r['medication']['start_date'] = r['medication']['start_date'].isoformat()
+                        r['medication']['start_date'] = r['medication']['start_date'].isoformat() if r['medication']['start_date'] and hasattr(r['medication']['start_date'], 'isoformat') else r['medication']['start_date']
                     if 'end_date' in r['medication'] and r['medication']['end_date']:
-                        r['medication']['end_date'] = r['medication']['end_date'].isoformat()
+                        r['medication']['end_date'] = r['medication']['end_date'].isoformat() if r['medication']['end_date'] and hasattr(r['medication']['end_date'], 'isoformat') else r['medication']['end_date']
                 
                 if 'vital_signs' in r and r['vital_signs']:
                     for vs in r['vital_signs']:
                         if 'measured_at' in vs:
-                            vs['measured_at'] = vs['measured_at'].isoformat()
+                            vs['measured_at'] = vs['measured_at'].isoformat() if vs['measured_at'] and hasattr(vs['measured_at'], 'isoformat') else vs['measured_at']
             
             # 添加到所有结果中
             all_results.append(results)
@@ -507,23 +543,23 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
         for r in results:
             r['_id'] = str(r['_id'])
             if 'record_date' in r:
-                r['record_date'] = r['record_date'].isoformat()
+                r['record_date'] = r['record_date'].isoformat() if r['record_date'] and hasattr(r['record_date'], 'isoformat') else r['record_date']
             if 'created_at' in r:
-                r['created_at'] = r['created_at'].isoformat()
+                r['created_at'] = r['created_at'].isoformat() if r['created_at'] and hasattr(r['created_at'], 'isoformat') else r['created_at']
             if 'updated_at' in r:
-                r['updated_at'] = r['updated_at'].isoformat()
+                r['updated_at'] = r['updated_at'].isoformat() if r['updated_at'] and hasattr(r['updated_at'], 'isoformat') else r['updated_at']
             
             # 处理用药记录和生命体征的日期
             if 'medication' in r and r['medication']:
                 if 'start_date' in r['medication'] and r['medication']['start_date']:
-                    r['medication']['start_date'] = r['medication']['start_date'].isoformat()
+                    r['medication']['start_date'] = r['medication']['start_date'].isoformat() if r['medication']['start_date'] and hasattr(r['medication']['start_date'], 'isoformat') else r['medication']['start_date']
                 if 'end_date' in r['medication'] and r['medication']['end_date']:
-                    r['medication']['end_date'] = r['medication']['end_date'].isoformat()
+                    r['medication']['end_date'] = r['medication']['end_date'].isoformat() if r['medication']['end_date'] and hasattr(r['medication']['end_date'], 'isoformat') else r['medication']['end_date']
             
             if 'vital_signs' in r and r['vital_signs']:
                 for vs in r['vital_signs']:
                     if 'measured_at' in vs:
-                        vs['measured_at'] = vs['measured_at'].isoformat()
+                        vs['measured_at'] = vs['measured_at'].isoformat() if vs['measured_at'] and hasattr(vs['measured_at'], 'isoformat') else vs['measured_at']
         
         # 记录查询历史
         record_query_history(patient_id, 'standard_query', query_params, is_anonymous=False)
@@ -732,7 +768,7 @@ def find_similar_records(vector, current_record_id, max_results=5, similarity_th
                         'record_type': record.get('record_type'),
                         'title': record.get('title', '无标题'),
                         'institution': record.get('institution', '未知机构'),
-                        'record_date': record.get('record_date').isoformat() if record.get('record_date') else None
+                        'record_date': record.get('record_date').isoformat() if record.get('record_date') and hasattr(record.get('record_date'), 'isoformat') else record.get('record_date'),
                     })
             except Exception as e:
                 current_app.logger.error(f"计算记录相似度失败: {str(e)}")
