@@ -1923,7 +1923,7 @@ def export_health_records():
                     'export_format': 'json',
                     'filename': filename,
                     'record_count': len(records),
-                    'download_url': f"/api/health/export/download/{filename}"
+                    'download_url': f"/health/export/download/{filename}"
                 }
             })
         
@@ -1968,7 +1968,7 @@ def export_health_records():
                     'export_format': 'csv',
                     'filename': filename,
                     'record_count': len(records),
-                    'download_url': f"/api/health/export/download/{filename}"
+                    'download_url': f"/health/export/download/{filename}"
                 }
             })
     
