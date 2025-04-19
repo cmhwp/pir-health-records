@@ -70,6 +70,30 @@ def log_activity(log_type, message, details=None, user_id=None, ip_address=None,
         db.session.rollback()
         return None
 
+def add_system_log(log_type, message, details=None, user_id=None):
+    """
+    添加系统日志的简化函数，主要给admin.py使用
+    
+    参数:
+        log_type (LogType): 日志类型
+        message (str): 日志消息
+        details (str或dict): 详细信息
+        user_id (int): 用户ID，不提供则使用当前登录用户
+    
+    返回:
+        SystemLog: 创建的日志对象
+    """
+    # 处理details参数，如果是字符串则转换为字典
+    if isinstance(details, str):
+        details = {'message': details}
+    
+    return log_activity(
+        log_type=log_type,
+        message=message,
+        details=details,
+        user_id=user_id
+    )
+
 def log_error(error_message, exception=None, details=None, user_id=None):
     """
     记录错误日志

@@ -662,6 +662,12 @@ def get_public_settings():
         
         # 添加系统版本等信息
         public_settings['system_version'] = current_app.config.get('SYSTEM_VERSION', '1.0.0')
+
+        # PIR设置
+        public_settings['pir_settings'] = {
+            'pir_batch_size': get_setting('pir_batch_size', 100),
+            'pir_enabled': get_setting('pir_enabled', False)
+        }
         
         # 获取可用角色列表
         available_roles = [

@@ -9,7 +9,8 @@ import json
 import time
 from datetime import datetime, timedelta
 from sqlalchemy.sql import func, distinct, desc
-from ..utils.log_utils import log_admin
+from ..utils.log_utils import log_admin, add_system_log
+from ..models.log import LogType
 from ..models.batch_jobs import (
     BatchJob, BatchJobLog, BatchJobError, 
     BatchStatus, BatchType, LogLevel,
@@ -933,9 +934,13 @@ def export_system_data():
         export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads/exports')
         os.makedirs(export_dir, exist_ok=True)
         
+        # 生成安全令牌并添加到文件名
+        import secrets
+        token = secrets.token_hex(8)  # 16个随机字符
+        
         # 生成导出文件名
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        filename = f"system_export_{export_type}_{timestamp}.json"
+        filename = f"system_export_{export_type}_{timestamp}_{token}.json"
         filepath = os.path.join(export_dir, filename)
         
         # 导出信息以便日志记录
@@ -943,7 +948,8 @@ def export_system_data():
             'export_type': export_type,
             'filename': filename,
             'timestamp': datetime.now().isoformat(),
-            'parameters': data
+            'parameters': data,
+            'token': token
         }
         
         # 根据类型导出不同的数据
@@ -1028,7 +1034,7 @@ def export_system_data():
         )
             
         # 返回下载链接
-        download_url = f"/api/admin/export/download/{filename}"
+        download_url = f"/admin/export/download/{filename}"
         
         return jsonify({
             'success': True,
@@ -1048,32 +1054,54 @@ def export_system_data():
 
 # 下载导出的数据
 @admin_bp.route('/export/download/<filename>', methods=['GET'])
-@api_login_required
-@role_required(Role.ADMIN)
 def download_exported_data(filename):
     try:
+        # 获取正确的导出目录
         export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads/exports')
         
+        # 检查文件是否存在
         file_path = os.path.join(export_dir, filename)
         if not os.path.exists(file_path):
+            current_app.logger.error(f"导出文件不存在: {file_path}")
             return jsonify({
                 'success': False,
-                'message': '文件不存在'
+                'message': '文件不存在或已被删除'
             }), 404
-            
-        # 记录下载行为
-        log_admin(
-            message=f'管理员下载导出文件: {filename}',
-            details=json.dumps({
-                'filename': filename,
-                'file_size': os.path.getsize(file_path),
-                'download_time': datetime.now().isoformat(),
-                'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            })
-        )
         
-        return send_from_directory(export_dir, filename, as_attachment=True)
+        # 安全检查：确认文件名格式是否正确
+        parts = filename.split('_')
+        if len(parts) < 5 or not parts[0].startswith('system'):
+            current_app.logger.warning(f"无效的导出文件名格式: {filename}")
+            return jsonify({
+                'success': False,
+                'message': '无效的文件格式'
+            }), 400
+            
+        # 检查来源IP地址并记录
+        ip_address = request.remote_addr
+        current_app.logger.info(f"文件下载请求: {filename}, IP: {ip_address}")
+        
+        # 记录下载行为（如果用户已登录）
+        if current_user.is_authenticated:
+            log_admin(
+                message=f'管理员下载导出文件: {filename}',
+                details=json.dumps({
+                    'filename': filename,
+                    'file_size': os.path.getsize(file_path),
+                    'download_time': datetime.now().isoformat(),
+                    'admin_username': current_user.username,
+                    'ip_address': ip_address
+                })
+            )
+        
+        # 返回文件，使用send_file而不是send_from_directory以避免重定向
+        from flask import send_file
+        return send_file(
+            file_path,
+            mimetype='application/json',
+            as_attachment=True,
+            download_name=filename
+        )
     except Exception as e:
         current_app.logger.error(f"下载导出数据失败: {str(e)}")
         return jsonify({

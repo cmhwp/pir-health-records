@@ -369,7 +369,7 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
         mongo_record['files'] = file_info
     
     # 添加用药记录
-    if record_data.get('record_type') == 'medication' and record_data.get('medication'):
+    if record_data.get('record_type') == 'PRESCRIPTION' and record_data.get('medication'):
         med_data = record_data.get('medication')
         mongo_record['medication'] = {
             'medication_name': med_data.get('medication_name', ''),
@@ -382,7 +382,7 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
         }
     
     # 添加生命体征
-    if record_data.get('record_type') == 'vital_signs' and record_data.get('vital_signs'):
+    if record_data.get('record_type') == 'VITAL_SIGN' and record_data.get('vital_signs'):
         mongo_record['vital_signs'] = []
         for vs_data in record_data.get('vital_signs', []):
             mongo_record['vital_signs'].append({
