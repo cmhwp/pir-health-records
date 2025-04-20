@@ -17,7 +17,7 @@ from ..utils.mongo_utils import mongo, get_mongo_db
 from bson.objectid import ObjectId
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from werkzeug.utils import secure_filename
 import json
 from sqlalchemy import desc, func, distinct, or_, case
@@ -134,6 +134,10 @@ def create_health_record():
         
         # 确保患者ID正确
         record_data['patient_id'] = current_user.id
+        
+        # 处理PIR保护标志
+        pir_protected = request.form.get('pir_protected', 'true').lower() == 'true'
+        record_data['pir_protected'] = pir_protected
             
         # 处理上传的文件
         file_info = []
@@ -497,7 +501,7 @@ def update_health_record(record_id):
         update_fields = {}
         
         # 基本字段
-        basic_fields = ['title', 'description', 'institution', 'doctor_name', 'visibility', 'tags', 'data']
+        basic_fields = ['title', 'description', 'institution', 'doctor_name', 'visibility', 'tags', 'pir_protected']
         for field in basic_fields:
             if field in update_data:
                 update_fields[field] = update_data[field]
@@ -507,7 +511,17 @@ def update_health_record(record_id):
             try:
                 update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%dT%H:%M:%S.%f')
             except ValueError:
-                update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%dT%H:%M:%S')
+                try:
+                    update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%dT%H:%M:%S')
+                except ValueError:
+                    try:
+                        # 增加对简单日期格式的支持
+                        update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%d')
+                    except ValueError:
+                        return jsonify({
+                            'success': False,
+                            'message': f'无效的日期格式: {update_data["record_date"]}'
+                        }), 400
         
         # 用药记录
         if 'medication' in update_data and record.get('record_type') == 'medication':
@@ -1842,6 +1856,13 @@ def get_search_filters():
 
 # =========================== 导入导出功能 ===========================
 
+# 创建一个日期时间序列化函数
+def json_serial(obj):
+    """JSON序列化函数，处理datetime和date对象"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError (f"Type {type(obj)} not serializable")
+
 # 导出健康记录
 @health_bp.route('/export', methods=['POST'])
 @login_required
@@ -1858,10 +1879,10 @@ def export_health_records():
             
         # 导出格式
         export_format = data.get('format', 'json').lower()
-        if export_format not in ['json', 'csv']:
+        if export_format not in ['json', 'excel']:
             return jsonify({
                 'success': False,
-                'message': '不支持的导出格式，请使用 json 或 csv'
+                'message': '不支持的导出格式，请使用 json 或 excel'
             }), 400
             
         # 获取要导出的记录ID列表
@@ -1912,9 +1933,13 @@ def export_health_records():
             filepath = os.path.join(UPLOAD_FOLDER, "..", "exports", filename)
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             
-            # 写入JSON文件
+            # 写入JSON文件 - 使用自定义序列化函数处理datetime对象
             with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, ensure_ascii=False, indent=2)
+                json.dump(export_data, f, ensure_ascii=False, indent=2, default=json_serial)
+                
+            # 生成下载令牌
+            from ..utils.token_utils import generate_download_token
+            token = generate_download_token(current_user.id, filename)
                 
             return jsonify({
                 'success': True,
@@ -1923,52 +1948,59 @@ def export_health_records():
                     'export_format': 'json',
                     'filename': filename,
                     'record_count': len(records),
-                    'download_url': f"/health/export/download/{filename}"
+                    'download_url': f"/health/export/download/{filename}?token={token}"
                 }
             })
         
-        elif export_format == 'csv':
-            # 确定CSV字段
+        elif export_format == 'excel':
+            # 确定Excel字段
             fields = [
                 'record_id', 'title', 'record_type', 'description', 'record_date',
                 'institution', 'doctor_name', 'tags', 'created_at'
             ]
             
             # 创建导出文件名
-            filename = f"health_records_export_{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
+            filename = f"health_records_export_{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
             filepath = os.path.join(UPLOAD_FOLDER, "..", "exports", filename)
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             
-            # 写入CSV文件
-            import csv
-            with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fields)
-                writer.writeheader()
-                
-                for record in records:
-                    # 将MongoDB记录转换为CSV行 - 使用统一的转换函数
-                    record_dict = mongo_health_record_to_dict(record)
-                    row = {
-                        'record_id': record_dict.get('_id'),
-                        'title': record_dict.get('title'),
-                        'record_type': record_dict.get('record_type'),
-                        'description': record_dict.get('description'),
-                        'record_date': record_dict.get('record_date'),
-                        'institution': record_dict.get('institution'),
-                        'doctor_name': record_dict.get('doctor_name'),
-                        'tags': record_dict.get('tags'),
-                        'created_at': record_dict.get('created_at')
-                    }
-                    writer.writerow(row)
+            # 使用pandas导出Excel格式
+            import pandas as pd
+            
+            # 准备数据
+            excel_data = []
+            for record in records:
+                # 将MongoDB记录转换为Excel行
+                record_dict = mongo_health_record_to_dict(record)
+                row = {
+                    'record_id': record_dict.get('_id'),
+                    'title': record_dict.get('title'),
+                    'record_type': record_dict.get('record_type'),
+                    'description': record_dict.get('description'),
+                    'record_date': record_dict.get('record_date'),
+                    'institution': record_dict.get('institution'),
+                    'doctor_name': record_dict.get('doctor_name'),
+                    'tags': record_dict.get('tags'),
+                    'created_at': record_dict.get('created_at')
+                }
+                excel_data.append(row)
+            
+            # 创建DataFrame并导出为Excel
+            df = pd.DataFrame(excel_data)
+            df.to_excel(filepath, index=False)
+            
+            # 生成下载令牌
+            from ..utils.token_utils import generate_download_token
+            token = generate_download_token(current_user.id, filename)
                     
             return jsonify({
                 'success': True,
                 'message': '健康记录导出成功',
                 'data': {
-                    'export_format': 'csv',
+                    'export_format': 'excel',
                     'filename': filename,
                     'record_count': len(records),
-                    'download_url': f"/health/export/download/{filename}"
+                    'download_url': f"/health/export/download/{filename}?token={token}"
                 }
             })
     
@@ -1981,23 +2013,62 @@ def export_health_records():
 
 # 下载导出的记录文件
 @health_bp.route('/export/download/<filename>', methods=['GET'])
-@login_required
-@role_required(Role.PATIENT)
 def download_exported_records(filename):
     try:
-        # 安全检查，确保只有当前用户可以下载自己的导出文件
-        if f"health_records_export_{current_user.id}_" not in filename:
+        # 获取认证token
+        token = request.args.get('token')
+        
+        # 如果用户已登录，则直接检查权限
+        if current_user.is_authenticated:
+            if not current_user.has_role(Role.PATIENT):
+                return jsonify({
+                    'success': False,
+                    'message': '只有患者可以下载导出文件'
+                }), 403
+                
+            # 安全检查，确保只有当前用户可以下载自己的导出文件
+            user_id_part = filename.split('_')[2] if len(filename.split('_')) > 2 else ""
+            if f"health_records_export_{current_user.id}_" not in filename:
+                return jsonify({
+                    'success': False,
+                    'message': '没有权限下载此文件'
+                }), 403
+        # 如果未登录但提供了token，则验证token
+        elif token:
+            from ..utils.token_utils import validate_download_token
+            user_id = validate_download_token(token, filename)
+            if not user_id:
+                return jsonify({
+                    'success': False,
+                    'message': '无效的下载令牌或令牌已过期'
+                }), 403
+                
+            # 验证文件名是否匹配token中的用户ID
+            if f"health_records_export_{user_id}_" not in filename:
+                return jsonify({
+                    'success': False,
+                    'message': '令牌与文件不匹配'
+                }), 403
+        # 既没有登录也没有提供token
+        else:
             return jsonify({
                 'success': False,
-                'message': '没有权限下载此文件'
-            }), 403
+                'message': '请先登录或提供有效的下载令牌'
+            }), 401
             
         # 导出目录
         export_dir = os.path.join(UPLOAD_FOLDER, "..", "exports")
         
         # 获取文件类型
         file_ext = filename.split('.')[-1].lower()
-        mime_type = 'application/json' if file_ext == 'json' else 'text/csv'
+        if file_ext == 'json':
+            mime_type = 'application/json'
+        elif file_ext == 'xlsx':
+            mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        elif file_ext == 'xls':
+            mime_type = 'application/vnd.ms-excel'
+        else:
+            mime_type = 'application/octet-stream'
         
         return send_from_directory(
             export_dir,
@@ -2037,10 +2108,10 @@ def import_health_records():
             
         # 检查文件类型
         file_ext = file.filename.split('.')[-1].lower()
-        if file_ext not in ['json', 'csv']:
+        if file_ext not in ['json', 'xlsx', 'xls']:
             return jsonify({
                 'success': False,
-                'message': '不支持的文件格式，请上传JSON或CSV文件'
+                'message': '不支持的文件格式，请上传JSON或Excel文件'
             }), 400
             
         # 保存上传的文件
@@ -2053,6 +2124,11 @@ def import_health_records():
         
         # 处理导入数据
         imported_records = []
+        skipped_records = []
+        
+        # 获取当前日期时间作为记录日期
+        current_datetime = datetime.now()
+        
         if file_ext == 'json':
             with open(filepath, 'r', encoding='utf-8') as f:
                 import_data = json.load(f)
@@ -2067,6 +2143,14 @@ def import_health_records():
             for record_data in import_data:
                 # 确保记录数据有效
                 if not isinstance(record_data, dict) or 'title' not in record_data or 'record_type' not in record_data:
+                    skipped_records.append({
+                        'reason': '缺少必要字段 (title, record_type)',
+                        'data': str(record_data)[:100] + '...' if len(str(record_data)) > 100 else str(record_data)
+                    })
+                    continue
+                
+                # 跳过标题为空的行
+                if not record_data.get('title') or str(record_data.get('title')).strip() == '':
                     continue
                     
                 # 确保记录类型有效
@@ -2076,18 +2160,31 @@ def import_health_records():
                 # 设置患者ID为当前用户
                 record_data['patient_id'] = current_user.id
                 
-                # 设置记录日期
-                if 'record_date' not in record_data or not record_data['record_date']:
-                    record_data['record_date'] = datetime.now()
-                else:
-                    try:
-                        record_date = datetime.fromisoformat(record_data['record_date'])
-                        record_data['record_date'] = record_date
-                    except ValueError:
-                        record_data['record_date'] = datetime.now()
+                # 处理PIR保护字段
+                record_data['pir_protected'] = record_data.get('pir_protected', True)
+                
+                # 始终使用当前日期作为记录日期
+                record_data['record_date'] = current_datetime
+                
+                # 设置创建和更新时间
+                record_data['created_at'] = current_datetime
+                record_data['updated_at'] = current_datetime
                 
                 # 存储到MongoDB
                 result = mongo.db.health_records.insert_one(record_data)
+                
+                # 添加到MySQL索引表
+                sql_record = HealthRecord(
+                    patient_id=current_user.id,
+                    record_type=record_data['record_type'],
+                    title=record_data['title'],
+                    record_date=current_datetime,  # 确保使用datetime对象而非字符串
+                    visibility=RecordVisibility.PRIVATE if 'visibility' not in record_data else RecordVisibility(record_data['visibility']),
+                    mongo_id=str(result.inserted_id),
+                    created_at=current_datetime,
+                    updated_at=current_datetime
+                )
+                db.session.add(sql_record)
                 
                 # 添加到已导入列表
                 imported_records.append({
@@ -2096,43 +2193,93 @@ def import_health_records():
                     'record_type': record_data['record_type']
                 })
                 
-        elif file_ext == 'csv':
-            import csv
-            with open(filepath, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
+        elif file_ext in ['xlsx', 'xls']:
+            # 使用pandas读取Excel文件
+            import pandas as pd
+            df = pd.read_excel(filepath)
+            
+            # 检查必要的列是否存在
+            required_cols = ['title', 'record_type']
+            for col in required_cols:
+                if col not in df.columns:
+                    return jsonify({
+                        'success': False,
+                        'message': f'Excel文件缺少必要的列: {col}'
+                    }), 400
+            
+            # 跳过前三行示例数据
+            if len(df) > 3:
+                df = df.iloc[3:]
                 
-                for row in reader:
-                    # 确保记录数据有效
-                    if not row or 'title' not in row or 'record_type' not in row:
-                        continue
-                        
-                    # 转换为记录数据
-                    record_data = {
-                        'title': row.get('title', ''),
-                        'record_type': row.get('record_type', RecordType.OTHER.value),
-                        'description': row.get('description', ''),
-                        'patient_id': current_user.id,
-                        'created_at': datetime.now(),
-                        'updated_at': datetime.now()
-                    }
+            # 处理每行数据
+            for idx, row in df.iterrows():
+                # 跳过标题为空的行
+                if pd.isna(row['title']) or str(row['title']).strip() == '':
+                    continue
                     
-                    # 设置记录日期
-                    if 'record_date' in row and row['record_date']:
-                        try:
-                            record_date = datetime.fromisoformat(row['record_date'])
-                            record_data['record_date'] = record_date
-                        except ValueError:
-                            record_data['record_date'] = datetime.now()
+                # 跳过记录类型为空的行
+                if pd.isna(row['record_type']) or str(row['record_type']).strip() == '':
+                    skipped_records.append({
+                        'reason': '缺少必要字段 (record_type)',
+                        'row': idx + 1,
+                        'title': str(row.get('title', ''))
+                    })
+                    continue
+                
+                # 转换为记录数据
+                record_data = {
+                    'title': str(row['title']),
+                    'record_type': str(row['record_type']),
+                    'patient_id': current_user.id,
+                    'created_at': current_datetime,
+                    'updated_at': current_datetime,
+                    'record_date': current_datetime  # 使用当前日期作为记录日期
+                }
+                
+                # 添加可选字段
+                if 'description' in df.columns and pd.notna(row['description']):
+                    record_data['description'] = str(row['description'])
+                    
+                # 处理PIR保护字段
+                if 'pir_protected' in df.columns and pd.notna(row['pir_protected']):
+                    pir_value = row['pir_protected']
+                    if isinstance(pir_value, bool):
+                        record_data['pir_protected'] = pir_value
+                    elif isinstance(pir_value, str):
+                        pir_value_lower = pir_value.lower()
+                        record_data['pir_protected'] = pir_value_lower in ('true', 'yes', '1', 't', 'y')
                     else:
-                        record_data['record_date'] = datetime.now()
-                        
-                    # 添加其他字段
-                    for field in ['institution', 'doctor_name', 'tags']:
-                        if field in row and row[field]:
-                            record_data[field] = row[field]
+                        record_data['pir_protected'] = bool(pir_value)
+                else:
+                    record_data['pir_protected'] = True
                     
-                    # 存储到MongoDB
+                # 添加其他可能存在的字段
+                for field in ['institution', 'doctor_name']:
+                    if field in df.columns and pd.notna(row[field]):
+                        record_data[field] = str(row[field])
+                
+                # 处理标签字段
+                if 'tags' in df.columns and pd.notna(row['tags']):
+                    tags_str = str(row['tags'])
+                    if tags_str:
+                        record_data['tags'] = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                
+                # 存储到MongoDB
+                try:
                     result = mongo.db.health_records.insert_one(record_data)
+                    
+                    # 添加到MySQL索引表
+                    sql_record = HealthRecord(
+                        patient_id=current_user.id,
+                        record_type=record_data['record_type'],
+                        title=record_data['title'],
+                        record_date=current_datetime,  # 确保使用datetime对象而非字符串
+                        visibility=RecordVisibility.PRIVATE if 'visibility' not in record_data else RecordVisibility(record_data['visibility']),
+                        mongo_id=str(result.inserted_id),
+                        created_at=current_datetime,
+                        updated_at=current_datetime
+                    )
+                    db.session.add(sql_record)
                     
                     # 添加到已导入列表
                     imported_records.append({
@@ -2140,13 +2287,43 @@ def import_health_records():
                         'title': record_data['title'],
                         'record_type': record_data['record_type']
                     })
+                except Exception as e:
+                    current_app.logger.error(f"导入记录失败: {str(e)}, 数据: {record_data}")
+                    skipped_records.append({
+                        'reason': f'导入失败: {str(e)}',
+                        'row': idx + 1,
+                        'title': record_data.get('title', '')
+                    })
         
+        # 添加到MySQL索引表，便于后续查询
+        try:
+            # 确保所有挂起的数据库更改都被提交
+            db.session.commit()
+            
+            # 记录导入日志
+            from ..utils.log_utils import log_record
+            log_record(
+                message=f'用户导入了 {len(imported_records)} 条健康记录',
+                details={
+                    'successful_imports': len(imported_records),
+                    'skipped_records': len(skipped_records),
+                    'file_name': os.path.basename(filepath),
+                    'file_format': file_ext,
+                    'import_time': datetime.now().isoformat()
+                }
+            )
+            
+        except Exception as e:
+            current_app.logger.error(f"同步导入记录到MySQL失败: {str(e)}")
+            db.session.rollback()
+            # 继续执行，不要中断过程
+            
         return jsonify({
             'success': True,
-            'message': f'成功导入 {len(imported_records)} 条健康记录',
+            'message': f'成功导入 {len(imported_records)} 条记录，跳过 {len(skipped_records)} 条无效记录',
             'data': {
                 'imported_records': imported_records,
-                'count': len(imported_records)
+                'skipped_records': skipped_records
             }
         })
     
@@ -2212,8 +2389,12 @@ def advanced_pir_query():
         for idx, record in record_mapping.items():
             match = True
             
+            # 只包含启用了PIR保护的记录
+            if not record.get('pir_protected', False):
+                match = False
+            
             # 记录类型匹配
-            if 'record_type' in query_params and query_params['record_type']:
+            if match and 'record_type' in query_params and query_params['record_type']:
                 if record.get('record_type') != query_params['record_type']:
                     match = False
             
@@ -2770,7 +2951,7 @@ def create_record_version(record_id):
         update_fields = {}
         
         # 基本字段
-        basic_fields = ['title', 'description', 'institution', 'doctor_name', 'visibility', 'tags', 'data']
+        basic_fields = ['title', 'description', 'institution', 'doctor_name', 'visibility', 'tags', 'data', 'pir_protected']
         for field in basic_fields:
             if field in update_data:
                 update_fields[field] = update_data[field]
@@ -2783,7 +2964,14 @@ def create_record_version(record_id):
                 try:
                     update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%dT%H:%M:%S')
                 except ValueError:
-                    pass
+                    try:
+                        # 增加对简单日期格式的支持
+                        update_fields['record_date'] = datetime.strptime(update_data['record_date'], '%Y-%m-%d')
+                    except ValueError:
+                        return jsonify({
+                            'success': False,
+                            'message': f'无效的日期格式: {update_data["record_date"]}'
+                        }), 400
         
         # 用药记录
         if 'medication' in update_data and record.get('record_type') == 'medication':
@@ -3167,50 +3355,142 @@ def batch_update_visibility():
         if not data or 'record_ids' not in data or 'visibility' not in data:
             return jsonify({
                 'success': False,
-                'message': '缺少必要参数 (record_ids, visibility)'
+                'message': '缺少必要字段 (record_ids, visibility)'
             }), 400
             
+        # 获取记录ID列表和目标可见性
         record_ids = data['record_ids']
-        visibility = data['visibility']
+        target_visibility = data['visibility']
         
         # 验证可见性值
-        try:
-            RecordVisibility(visibility)
-        except ValueError:
+        if target_visibility not in [v.value for v in RecordVisibility]:
             return jsonify({
                 'success': False,
-                'message': f'无效的可见性值: {visibility}'
+                'message': f'无效的可见性值: {target_visibility}'
             }), 400
             
-        # 验证访问权限（只能更新自己的记录）
+        # 更新计数器
+        updated_count = 0
+        not_found_count = 0
+        not_owned_count = 0
+        
         for record_id in record_ids:
+            # 查找记录
             mongo_id = format_mongo_id(record_id)
             if not mongo_id:
+                not_found_count += 1
                 continue
                 
-            mongo_db = get_mongo_db()
-            record = mongo_db.health_records.find_one({'_id': mongo_id})
-            if record and str(record['patient_id']) != str(current_user.id) and not current_user.has_role(Role.ADMIN):
-                return jsonify({
-                    'success': False,
-                    'message': f'没有权限更新记录: {record_id}'
-                }), 403
-        
-        # 执行批量更新
-        updated_count = bulk_update_visibility(record_ids, visibility, current_user.id)
+            # 查找MySQL记录
+            record = HealthRecord.query.filter_by(mongo_id=str(mongo_id)).first()
+            if not record:
+                not_found_count += 1
+                continue
+                
+            # 验证所有权
+            if record.patient_id != current_user.id and not current_user.has_role(Role.ADMIN):
+                not_owned_count += 1
+                continue
+                
+            # 更新可见性
+            record.visibility = target_visibility
+            
+            # 同步更新MongoDB
+            mongo.db.health_records.update_one(
+                {'_id': mongo_id},
+                {'$set': {'visibility': target_visibility}}
+            )
+            
+            updated_count += 1
+            
+        # 提交更改
+        db.session.commit()
         
         return jsonify({
             'success': True,
-            'message': f'批量更新成功，共更新{updated_count}条记录',
+            'message': f'成功更新{updated_count}条记录的可见性',
             'data': {
-                'updated_count': updated_count
+                'updated_count': updated_count,
+                'not_found_count': not_found_count,
+                'not_owned_count': not_owned_count
             }
         })
     except Exception as e:
-        current_app.logger.error(f"批量更新记录可见性失败: {str(e)}")
+        current_app.logger.error(f"批量更新可见性失败: {str(e)}")
+        db.session.rollback()
         return jsonify({
             'success': False,
-            'message': f'批量更新记录可见性失败: {str(e)}'
+            'message': f'批量更新可见性失败: {str(e)}'
+        }), 500
+
+# 批量更新记录PIR保护状态
+@health_bp.route('/records/batch/pir-protection', methods=['POST'])
+@login_required
+def batch_update_pir_protection():
+    try:
+        data = request.json
+        if not data or 'record_ids' not in data or 'pir_protected' not in data:
+            return jsonify({
+                'success': False,
+                'message': '缺少必要字段 (record_ids, pir_protected)'
+            }), 400
+            
+        # 获取记录ID列表和目标PIR保护状态
+        record_ids = data['record_ids']
+        pir_protected = data['pir_protected']
+        
+        # 确保pir_protected是布尔值
+        if not isinstance(pir_protected, bool):
+            return jsonify({
+                'success': False,
+                'message': 'pir_protected必须是布尔值'
+            }), 400
+            
+        # 更新计数器
+        updated_count = 0
+        not_found_count = 0
+        not_owned_count = 0
+        
+        for record_id in record_ids:
+            # 查找记录
+            mongo_id = format_mongo_id(record_id)
+            if not mongo_id:
+                not_found_count += 1
+                continue
+                
+            # 查找MongoDB记录
+            record = mongo.db.health_records.find_one({'_id': mongo_id})
+            if not record:
+                not_found_count += 1
+                continue
+                
+            # 验证所有权
+            if record.get('patient_id') != current_user.id and not current_user.has_role(Role.ADMIN):
+                not_owned_count += 1
+                continue
+                
+            # 更新PIR保护状态
+            mongo.db.health_records.update_one(
+                {'_id': mongo_id},
+                {'$set': {'pir_protected': pir_protected}}
+            )
+            
+            updated_count += 1
+            
+        return jsonify({
+            'success': True,
+            'message': f'成功更新{updated_count}条记录的PIR保护状态',
+            'data': {
+                'updated_count': updated_count,
+                'not_found_count': not_found_count,
+                'not_owned_count': not_owned_count
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"批量更新PIR保护状态失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'批量更新PIR保护状态失败: {str(e)}'
         }), 500
 
 # 临时修复版本快照
@@ -3518,7 +3798,7 @@ def get_sharable_user_detail(user_id):
                     'share_id': shared.id,
                     'record_id': record.mongo_id,
                     'title': record.title,
-                    'record_type': record.record_type.value,
+                    'record_type': record.record_type.value if hasattr(record.record_type, 'value') else record.record_type,
                     'permission': shared.permission.value,
                     'created_at': shared.created_at.isoformat() if shared.created_at else None
                 })
@@ -3775,4 +4055,326 @@ def decrypt_health_record(record_id):
         return jsonify({
             'success': False,
             'message': f'解密健康记录失败: {str(e)}'
+        }), 500
+
+# 生成健康记录导入模板
+@health_bp.route('/import/template', methods=['GET'])
+@login_required
+def generate_import_template():
+    try:
+        # 获取请求参数，确定要生成的模板格式
+        template_format = request.args.get('format', 'excel').lower()
+        if template_format != 'excel':
+            return jsonify({
+                'success': False,
+                'message': '目前仅支持Excel格式的导入模板'
+            }), 400
+
+        # 创建导出目录
+        export_dir = os.path.join(UPLOAD_FOLDER, "..", "templates")
+        os.makedirs(export_dir, exist_ok=True)
+        
+        # 创建模板文件名 - 加入用户ID和时间戳确保唯一性
+        filename = f"health_records_import_template_{current_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+        filepath = os.path.join(export_dir, filename)
+        
+        # 使用pandas创建Excel模板
+        import pandas as pd
+        
+        # 获取当前日期和前几天的日期作为示例
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        two_days_ago = today - timedelta(days=2)
+        
+        # 定义模板数据 - 包含示例行和列说明
+        template_data = {
+            'title': ['肺部CT检查', '血压记录', '血糖监测', ''],
+            'record_type': ['IMAGING', 'VITAL_SIGNS', 'LAB_RESULT', ''],
+            'description': ['肺部CT检查结果正常，未见异常', '收缩压120mmHg，舒张压80mmHg', '空腹血糖5.4mmol/L', ''],
+            'institution': ['北京协和医院', '社区医疗中心', '家庭自测', ''],
+            'doctor_name': ['张医生', '李医生', '', ''],
+            'tags': ['年度检查,肺部', '定期检查,血压', '日常监测,血糖', ''],
+            'pir_protected': [True, True, False, '']
+        }
+        
+        # 创建DataFrame
+        df = pd.DataFrame(template_data)
+        
+        # 写入第一个工作表 - 模板
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='导入模板', index=False)
+            
+            # 获取工作簿和工作表对象
+            workbook = writer.book
+            worksheet = writer.sheets['导入模板']
+            
+            # 创建第二个工作表 - 说明
+            instruction_sheet = workbook.create_sheet(title='填写说明')
+            
+            # 添加说明内容
+            instructions = [
+                ['健康记录导入模板填写说明'],
+                [''],
+                ['1. 必填字段：title(标题), record_type(记录类型)'],
+                ['2. 记录类型(record_type)可选值：'],
+                ['   - GENERAL: 一般记录'],
+                ['   - IMAGING: 影像检查'],
+                ['   - LAB_RESULT: 实验室结果'],
+                ['   - MEDICATION: 药物治疗'],
+                ['   - SURGERY: 手术'],
+                ['   - VITAL_SIGNS: 生命体征'],
+                ['   - VACCINATION: 疫苗接种'],
+                ['   - ALLERGY: 过敏记录'],
+                ['   - DIAGNOSIS: 诊断结果'],
+                ['   - PROGRESS_NOTE: 进展记录'],
+                ['   - CHRONIC_DISEASE: 慢性病'],
+                ['   - EMERGENCY: 急诊记录'],
+                ['   - FAMILY_HISTORY: 家族病史'],
+                ['   - OTHER: 其他'],
+                ['3. 记录日期(record_date): 系统会自动使用当前日期，无需填写'],
+                ['4. 标签(tags)格式: 多个标签用逗号分隔，如"标签1,标签2,标签3"'],
+                ['5. PIR保护(pir_protected): 填写TRUE或FALSE，表示是否启用PIR隐私保护'],
+                ['6. 第一行到第三行是示例数据，实际导入时会被忽略']
+            ]
+            
+            for row_idx, row_data in enumerate(instructions, 1):
+                for col_idx, value in enumerate(row_data, 1):
+                    instruction_sheet.cell(row=row_idx, column=col_idx, value=value)
+            
+            # 设置列宽
+            instruction_sheet.column_dimensions['A'].width = 80
+        
+        # 生成下载令牌
+        from ..utils.token_utils import generate_download_token
+        token = generate_download_token(current_user.id, filename)
+        
+        return jsonify({
+            'success': True,
+            'message': '成功生成健康记录导入模板',
+            'data': {
+                'filename': filename,
+                'format': 'excel',
+                'download_url': f"/health/import/template/download/{filename}?token={token}"
+            }
+        })
+    
+    except Exception as e:
+        current_app.logger.error(f"生成导入模板失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'生成导入模板失败: {str(e)}'
+        }), 500
+
+# 下载健康记录导入模板
+@health_bp.route('/import/template/download/<filename>', methods=['GET'])
+def download_import_template(filename):
+    try:
+        # 获取认证token
+        token = request.args.get('token')
+        
+        # 如果用户已登录，则直接检查权限
+        if current_user.is_authenticated:
+            # 安全检查，确保只有当前用户可以下载自己的导出文件
+            if f"health_records_import_template_{current_user.id}_" not in filename:
+                return jsonify({
+                    'success': False,
+                    'message': '没有权限下载此文件'
+                }), 403
+        # 如果未登录但提供了token，则验证token
+        elif token:
+            from ..utils.token_utils import validate_download_token
+            user_id = validate_download_token(token, filename)
+            if not user_id:
+                return jsonify({
+                    'success': False,
+                    'message': '无效的下载令牌或令牌已过期'
+                }), 403
+                
+            # 验证文件名是否匹配token中的用户ID
+            if f"health_records_import_template_{user_id}_" not in filename:
+                return jsonify({
+                    'success': False,
+                    'message': '令牌与文件不匹配'
+                }), 403
+        # 既没有登录也没有提供token
+        else:
+            return jsonify({
+                'success': False,
+                'message': '请先登录或提供有效的下载令牌'
+            }), 401
+            
+        # 模板目录
+        template_dir = os.path.join(UPLOAD_FOLDER, "..", "templates")
+        
+        # 获取文件类型
+        file_ext = filename.split('.')[-1].lower()
+        if file_ext == 'xlsx':
+            mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        elif file_ext == 'xls':
+            mime_type = 'application/vnd.ms-excel'
+        else:
+            mime_type = 'application/octet-stream'
+        
+        return send_from_directory(
+            template_dir,
+            filename,
+            as_attachment=True,
+            mimetype=mime_type
+        )
+    
+    except Exception as e:
+        current_app.logger.error(f"下载导入模板失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'下载导入模板失败: {str(e)}'
+        }), 500
+
+@health_bp.route('/statistics/monthly', methods=['GET'])
+@login_required
+@role_required(Role.PATIENT)
+def get_monthly_health_statistics():
+    try:
+        # 获取请求参数
+        month = request.args.get('month')  # 格式: YYYY-MM
+        record_type = request.args.get('record_type')
+        
+        # 如果未指定月份，使用当前月份
+        if not month:
+            month = datetime.now().strftime('%Y-%m')
+        
+        # 解析月份
+        year, month_num = map(int, month.split('-'))
+        
+        # 当月的开始和结束日期
+        current_month_start = datetime(year, month_num, 1)
+        if month_num == 12:
+            next_month_start = datetime(year + 1, 1, 1)
+        else:
+            next_month_start = datetime(year, month_num + 1, 1)
+        
+        # 上个月的开始和结束日期
+        if month_num == 1:
+            prev_month_start = datetime(year - 1, 12, 1)
+            prev_month_end = current_month_start
+        else:
+            prev_month_start = datetime(year, month_num - 1, 1)
+            prev_month_end = current_month_start
+        
+        # 去年同月的开始和结束日期
+        last_year_month_start = datetime(year - 1, month_num, 1)
+        if month_num == 12:
+            last_year_month_end = datetime(year, 1, 1)
+        else:
+            last_year_month_end = datetime(year - 1, month_num + 1, 1)
+        
+        # 基本查询条件
+        base_query = {'patient_id': current_user.id}
+        
+        # 添加记录类型过滤
+        if record_type:
+            base_query['record_type'] = record_type
+        
+        # 查询当月记录数
+        current_month_query = base_query.copy()
+        current_month_query.update({
+            'created_at': {
+                '$gte': current_month_start,
+                '$lt': next_month_start
+            }
+        })
+        current_month_count = mongo.db.health_records.count_documents(current_month_query)
+        
+        # 查询上月记录数
+        prev_month_query = base_query.copy()
+        prev_month_query.update({
+            'created_at': {
+                '$gte': prev_month_start,
+                '$lt': prev_month_end
+            }
+        })
+        prev_month_count = mongo.db.health_records.count_documents(prev_month_query)
+        
+        # 计算环比增长率
+        month_over_month_growth = 0
+        if prev_month_count > 0:
+            month_over_month_growth = round((current_month_count - prev_month_count) / prev_month_count * 100, 2)
+        
+        # 查询去年同月记录数
+        last_year_month_query = base_query.copy()
+        last_year_month_query.update({
+            'created_at': {
+                '$gte': last_year_month_start,
+                '$lt': last_year_month_end
+            }
+        })
+        last_year_month_count = mongo.db.health_records.count_documents(last_year_month_query)
+        
+        # 计算同比增长率
+        year_over_year_growth = None
+        if last_year_month_count > 0:
+            year_over_year_growth = round((current_month_count - last_year_month_count) / last_year_month_count * 100, 2)
+        
+        # 获取每月记录数（近6个月）
+        monthly_counts = {}
+        for i in range(5, -1, -1):
+            if month_num - i <= 0:
+                month_year = year - 1
+                month_val = month_num - i + 12
+            else:
+                month_year = year
+                month_val = month_num - i
+                
+            month_start = datetime(month_year, month_val, 1)
+            
+            if month_val == 12:
+                month_end = datetime(month_year + 1, 1, 1)
+            else:
+                month_end = datetime(month_year, month_val + 1, 1)
+            
+            month_query = base_query.copy()
+            month_query.update({
+                'created_at': {
+                    '$gte': month_start,
+                    '$lt': month_end
+                }
+            })
+            month_count = mongo.db.health_records.count_documents(month_query)
+            month_key = f"{month_year}-{month_val:02d}"
+            monthly_counts[month_key] = month_count
+        
+        # 获取当月按记录类型的统计
+        type_counts = {}
+        if not record_type:
+            pipeline = [
+                {'$match': {
+                    'patient_id': current_user.id,
+                    'created_at': {
+                        '$gte': current_month_start, 
+                        '$lt': next_month_start
+                    }
+                }},
+                {'$group': {
+                    '_id': '$record_type',
+                    'count': {'$sum': 1}
+                }}
+            ]
+            type_results = list(mongo.db.health_records.aggregate(pipeline))
+            for result in type_results:
+                type_counts[result['_id']] = result['count']
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'current_month_count': current_month_count,
+                'monthly_counts': monthly_counts,
+                'type_counts': type_counts,
+                'month_over_month_growth': month_over_month_growth,
+                'year_over_year_growth': year_over_year_growth
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取月度健康记录统计失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取月度健康记录统计失败: {str(e)}'
         }), 500

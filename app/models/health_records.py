@@ -389,6 +389,10 @@ def mongo_health_record_to_dict(mongo_record):
         for vital_sign in result['vital_signs']:
             if 'measured_at' in vital_sign and vital_sign['measured_at'] and isinstance(vital_sign['measured_at'], datetime):
                 vital_sign['measured_at'] = vital_sign['measured_at'].isoformat()
+    
+    # 确保pir_protected字段存在，默认为False
+    if 'pir_protected' not in result:
+        result['pir_protected'] = False
                 
     return result
 

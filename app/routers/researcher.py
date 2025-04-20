@@ -193,6 +193,7 @@ def get_accessible_records():
                 'updated_at': record.updated_at.isoformat() if record.updated_at else None,
                 'visibility': record.visibility.value,
                 'is_encrypted': record.is_encrypted,
+                'pir_protected': mongo_data.get('pir_protected', False),
                 'description': mongo_data.get('description'),
                 'doctor_name': mongo_data.get('doctor_name'),
                 'patient_name': mongo_data.get('patient_name', '匿名患者')

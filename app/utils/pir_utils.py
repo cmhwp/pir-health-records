@@ -254,6 +254,9 @@ def prepare_pir_database(health_records):
     """
     from flask import current_app
     
+    # 过滤只包含启用了PIR保护的记录
+    health_records = [record for record in health_records if record.get('pir_protected', False)]
+    
     # 创建记录到数值向量的映射
     record_vectors = []
     record_mapping = {}
@@ -338,6 +341,9 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     # 确保is_encrypted标志存在，默认为False
     is_encrypted = record_data.get('is_encrypted', False)
     
+    # 设置PIR保护状态，默认为True
+    pir_protected = record_data.get('pir_protected', True)
+    
     # 创建MongoDB记录
     mongo_record = {
         'patient_id': patient_id,
@@ -353,6 +359,7 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
         'created_at': datetime.now(),
         'updated_at': datetime.now(),
         'is_encrypted': is_encrypted,   # 明确设置加密标志
+        'pir_protected': pir_protected, # 明确设置PIR保护状态
         'version': 1
     }
     
@@ -398,7 +405,7 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     result = mongo_db.health_records.insert_one(mongo_record)
     
     return str(result.inserted_id)
-
+ 
 def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
     """
     从MongoDB查询健康记录
@@ -419,6 +426,10 @@ def query_health_records_mongodb(query_params, patient_id, is_anonymous=False):
     # 添加查询条件
     if 'record_type' in query_params and query_params['record_type']:
         query['record_type'] = query_params['record_type']
+    
+    # 如果是匿名查询，默认只包含启用了PIR保护的记录
+    if is_anonymous:
+        query['pir_protected'] = True
     
     # 日期范围
     date_query = {}
