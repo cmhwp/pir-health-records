@@ -329,12 +329,29 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     # 处理日期
     if 'record_date' in record_data and record_data['record_date']:
         try:
-            record_date = datetime.strptime(record_data['record_date'], '%Y-%m-%dT%H:%M:%S.%f')
-        except ValueError:
-            try:
-                record_date = datetime.strptime(record_data['record_date'], '%Y-%m-%dT%H:%M:%S')
-            except ValueError:
+            # 尝试多种日期格式
+            date_formats = ['%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d']
+            record_date = None
+            
+            for fmt in date_formats:
+                try:
+                    record_date = datetime.strptime(record_data['record_date'], fmt)
+                    break
+                except ValueError:
+                    continue
+            
+            # 如果所有格式都失败，尝试去除时间部分
+            if record_date is None and 'T' in record_data['record_date']:
+                date_part = record_data['record_date'].split('T')[0]
+                record_date = datetime.strptime(date_part, '%Y-%m-%d')
+            
+            # 如果仍然失败，使用当前时间
+            if record_date is None:
+                current_app.logger.warning(f"无法解析记录日期格式: {record_data['record_date']}, 使用当前时间")
                 record_date = datetime.now()
+        except Exception as e:
+            current_app.logger.warning(f"处理记录日期出错: {str(e)}, 使用当前时间")
+            record_date = datetime.now()
     else:
         record_date = datetime.now()
     
@@ -378,12 +395,61 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     # 添加用药记录
     if record_data.get('record_type') == 'PRESCRIPTION' and record_data.get('medication'):
         med_data = record_data.get('medication')
+        
+        # 处理开始日期
+        start_date = None
+        if med_data.get('start_date'):
+            try:
+                # 尝试多种日期格式
+                date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                for fmt in date_formats:
+                    try:
+                        # 先解析为date对象
+                        date_obj = datetime.strptime(med_data.get('start_date'), fmt).date()
+                        # 转换为datetime对象 (MongoDB支持)
+                        start_date = datetime.combine(date_obj, datetime.min.time())
+                        break
+                    except ValueError:
+                        continue
+                
+                # 如果所有格式都失败，尝试去除时间部分
+                if start_date is None and 'T' in med_data.get('start_date'):
+                    date_part = med_data.get('start_date').split('T')[0]
+                    date_obj = datetime.strptime(date_part, '%Y-%m-%d').date()
+                    start_date = datetime.combine(date_obj, datetime.min.time())
+            except Exception as e:
+                current_app.logger.warning(f"MongoDB存储时处理start_date出错: {str(e)}, 使用原始值: {med_data.get('start_date')}")
+        
+        # 处理结束日期
+        end_date = None
+        if med_data.get('end_date'):
+            try:
+                # 尝试多种日期格式
+                date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                for fmt in date_formats:
+                    try:
+                        # 先解析为date对象
+                        date_obj = datetime.strptime(med_data.get('end_date'), fmt).date()
+                        # 转换为datetime对象 (MongoDB支持)
+                        end_date = datetime.combine(date_obj, datetime.min.time())
+                        break
+                    except ValueError:
+                        continue
+                
+                # 如果所有格式都失败，尝试去除时间部分
+                if end_date is None and 'T' in med_data.get('end_date'):
+                    date_part = med_data.get('end_date').split('T')[0]
+                    date_obj = datetime.strptime(date_part, '%Y-%m-%d').date()
+                    end_date = datetime.combine(date_obj, datetime.min.time())
+            except Exception as e:
+                current_app.logger.warning(f"MongoDB存储时处理end_date出错: {str(e)}, 使用原始值: {med_data.get('end_date')}")
+        
         mongo_record['medication'] = {
             'medication_name': med_data.get('medication_name', ''),
             'dosage': med_data.get('dosage'),
             'frequency': med_data.get('frequency'),
-            'start_date': datetime.strptime(med_data.get('start_date'), '%Y-%m-%d').date() if med_data.get('start_date') else None,
-            'end_date': datetime.strptime(med_data.get('end_date'), '%Y-%m-%d').date() if med_data.get('end_date') else None,
+            'start_date': start_date,
+            'end_date': end_date,
             'instructions': med_data.get('instructions'),
             'side_effects': med_data.get('side_effects')
         }
@@ -392,12 +458,34 @@ def store_health_record_mongodb(record_data, patient_id, file_info=None):
     if record_data.get('record_type') == 'VITAL_SIGN' and record_data.get('vital_signs'):
         mongo_record['vital_signs'] = []
         for vs_data in record_data.get('vital_signs', []):
+            # 处理测量时间
+            measured_at = None
+            if vs_data.get('measured_at'):
+                try:
+                    # 尝试多种日期格式
+                    date_formats = ['%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d']
+                    for fmt in date_formats:
+                        try:
+                            measured_at = datetime.strptime(vs_data.get('measured_at'), fmt)
+                            break
+                        except ValueError:
+                            continue
+                    
+                    # 如果所有格式都失败，使用当前时间
+                    if measured_at is None:
+                        current_app.logger.warning(f"无法解析测量时间格式: {vs_data.get('measured_at')}, 使用当前时间")
+                        measured_at = datetime.now()
+                except Exception as e:
+                    current_app.logger.warning(f"处理测量时间出错: {str(e)}, 使用当前时间")
+                    measured_at = datetime.now()
+            else:
+                measured_at = datetime.now()
+            
             mongo_record['vital_signs'].append({
                 'type': vs_data.get('type', ''),
                 'value': float(vs_data.get('value', 0)),
                 'unit': vs_data.get('unit'),
-                'measured_at': datetime.strptime(vs_data.get('measured_at', datetime.now().isoformat()), 
-                                               '%Y-%m-%dT%H:%M:%S.%f') if 'measured_at' in vs_data else datetime.now(),
+                'measured_at': measured_at,
                 'notes': vs_data.get('notes')
             })
     

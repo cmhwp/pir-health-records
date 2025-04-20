@@ -188,6 +188,94 @@ def create_health_record():
             )
             db.session.add(record_file)
         
+        # 处理特定类型的健康记录，存储额外数据到MySQL
+        record_type = record_data.get('record_type')
+        
+        # 处理处方记录
+        if record_type == 'PRESCRIPTION' and record_data.get('medication'):
+            med_data = record_data.get('medication')
+            
+            # 处理开始日期
+            start_date = None
+            if med_data.get('start_date'):
+                try:
+                    # 尝试多种日期格式
+                    date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                    for fmt in date_formats:
+                        try:
+                            start_date = datetime.strptime(med_data.get('start_date'), fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                    
+                    # 如果所有格式都失败，尝试去除时间部分
+                    if start_date is None and 'T' in med_data.get('start_date'):
+                        date_part = med_data.get('start_date').split('T')[0]
+                        start_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                except Exception as e:
+                    current_app.logger.warning(f"处理开始日期出错: {str(e)}, 使用原始值: {med_data.get('start_date')}")
+            
+            # 处理结束日期
+            end_date = None
+            if med_data.get('end_date'):
+                try:
+                    # 尝试多种日期格式
+                    date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                    for fmt in date_formats:
+                        try:
+                            end_date = datetime.strptime(med_data.get('end_date'), fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                    
+                    # 如果所有格式都失败，尝试去除时间部分
+                    if end_date is None and 'T' in med_data.get('end_date'):
+                        date_part = med_data.get('end_date').split('T')[0]
+                        end_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                except Exception as e:
+                    current_app.logger.warning(f"处理结束日期出错: {str(e)}, 使用原始值: {med_data.get('end_date')}")
+            
+            medication_record = MedicationRecord(
+                record_id=record.id,
+                prescription_id=record_data.get('prescription_id'),
+                medication_name=med_data.get('medication_name', ''),
+                dosage=med_data.get('dosage'),
+                frequency=med_data.get('frequency'),
+                start_date=start_date,
+                end_date=end_date,
+                instructions=med_data.get('instructions'),
+                side_effects=med_data.get('side_effects'),
+                is_prescribed=bool(record_data.get('prescription_id'))
+            )
+            db.session.add(medication_record)
+            current_app.logger.info(f"添加了处方记录 {medication_record.medication_name}")
+        
+        # 处理生命体征记录
+        if record_type == 'VITAL_SIGN' and record_data.get('vital_signs'):
+            for vs_data in record_data.get('vital_signs', []):
+                measured_at = None
+                if vs_data.get('measured_at'):
+                    try:
+                        measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S.%f')
+                    except ValueError:
+                        try:
+                            measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S')
+                        except ValueError:
+                            measured_at = datetime.now()
+                else:
+                    measured_at = datetime.now()
+                
+                vital_sign = VitalSign(
+                    record_id=record.id,
+                    type=vs_data.get('type', ''),
+                    value=float(vs_data.get('value', 0)),
+                    unit=vs_data.get('unit'),
+                    measured_at=measured_at,
+                    notes=vs_data.get('notes')
+                )
+                db.session.add(vital_sign)
+                current_app.logger.info(f"添加了生命体征记录 {vital_sign.type}: {vital_sign.value} {vital_sign.unit}")
+        
         # 记录创建健康记录日志
         log_record(
             message=f'用户创建了健康记录: {record_data.get("title")}',
@@ -524,7 +612,7 @@ def update_health_record(record_id):
                         }), 400
         
         # 用药记录
-        if 'medication' in update_data and record.get('record_type') == 'medication':
+        if 'medication' in update_data and record.get('record_type') == 'PRESCRIPTION':
             med_data = update_data['medication']
             medication_update = {}
             
@@ -536,11 +624,53 @@ def update_health_record(record_id):
             for date_field in ['start_date', 'end_date']:
                 if date_field in med_data and med_data[date_field]:
                     try:
-                        medication_update[f'medication.{date_field}'] = datetime.strptime(med_data[date_field], '%Y-%m-%d')
-                    except:
-                        pass
-            
+                        # 尝试多种日期格式
+                        date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                        for fmt in date_formats:
+                            try:
+                                date_value = datetime.strptime(med_data[date_field], fmt).date()
+                                medication_update[f'medication.{date_field}'] = date_value
+                                break
+                            except ValueError:
+                                continue
+                        
+                        # 如果所有格式都失败，尝试去除时间部分
+                        if f'medication.{date_field}' not in medication_update and 'T' in med_data[date_field]:
+                            date_part = med_data[date_field].split('T')[0]
+                            date_value = datetime.strptime(date_part, '%Y-%m-%d').date()
+                            medication_update[f'medication.{date_field}'] = date_value
+                    except Exception as e:
+                        current_app.logger.warning(f"更新记录时处理{date_field}出错: {str(e)}, 跳过该字段")
+                        
             update_fields.update(medication_update)
+        
+        # 生命体征记录更新
+        if 'vital_signs' in update_data and record.get('record_type') == 'VITAL_SIGN':
+            # 先保存旧值，以便后续比较
+            old_vital_signs = record.get('vital_signs', [])
+            # 更新MongoDB中的值
+            update_fields['vital_signs'] = []
+            
+            for vs_data in update_data['vital_signs']:
+                measured_at = None
+                if vs_data.get('measured_at'):
+                    try:
+                        measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S.%f')
+                    except ValueError:
+                        try:
+                            measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S')
+                        except ValueError:
+                            measured_at = datetime.now()
+                else:
+                    measured_at = datetime.now()
+                
+                update_fields['vital_signs'].append({
+                    'type': vs_data.get('type', ''),
+                    'value': float(vs_data.get('value', 0)),
+                    'unit': vs_data.get('unit'),
+                    'measured_at': measured_at,
+                    'notes': vs_data.get('notes')
+                })
         
         # 设置更新时间
         update_fields['updated_at'] = datetime.now()
@@ -569,6 +699,167 @@ def update_health_record(record_id):
                     pass
                     
             sql_record.updated_at = update_fields['updated_at']
+            
+            # 更新处方记录 (MySQL)
+            if 'medication' in update_data and record.get('record_type') == 'PRESCRIPTION':
+                # 查找现有的用药记录
+                med_record = MedicationRecord.query.filter_by(record_id=sql_record.id).first()
+                med_data = update_data['medication']
+                
+                if med_record:
+                    # 更新现有记录
+                    if 'medication_name' in med_data:
+                        med_record.medication_name = med_data['medication_name']
+                    if 'dosage' in med_data:
+                        med_record.dosage = med_data['dosage']
+                    if 'frequency' in med_data:
+                        med_record.frequency = med_data['frequency']
+                    if 'instructions' in med_data:
+                        med_record.instructions = med_data['instructions']
+                    if 'side_effects' in med_data:
+                        med_record.side_effects = med_data['side_effects']
+                    
+                    # 处理日期
+                    if 'start_date' in med_data and med_data['start_date']:
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    med_record.start_date = datetime.strptime(med_data['start_date'], fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if med_record.start_date is None and 'T' in med_data['start_date']:
+                                date_part = med_data['start_date'].split('T')[0]
+                                med_record.start_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"更新MySQL记录时处理start_date出错: {str(e)}")
+                            
+                    if 'end_date' in med_data and med_data['end_date']:
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    med_record.end_date = datetime.strptime(med_data['end_date'], fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if med_record.end_date is None and 'T' in med_data['end_date']:
+                                date_part = med_data['end_date'].split('T')[0]
+                                med_record.end_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"更新MySQL记录时处理end_date出错: {str(e)}")
+                    
+                    med_record.updated_at = datetime.now()
+                    current_app.logger.info(f"更新了处方记录 {med_record.medication_name}")
+                else:
+                    # 创建新记录
+                    # 处理开始日期
+                    start_date = None
+                    if med_data.get('start_date'):
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    start_date = datetime.strptime(med_data.get('start_date'), fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if start_date is None and 'T' in med_data.get('start_date'):
+                                date_part = med_data.get('start_date').split('T')[0]
+                                start_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"创建新记录时处理start_date出错: {str(e)}")
+                    
+                    # 处理结束日期
+                    end_date = None
+                    if med_data.get('end_date'):
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    end_date = datetime.strptime(med_data.get('end_date'), fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if end_date is None and 'T' in med_data.get('end_date'):
+                                date_part = med_data.get('end_date').split('T')[0]
+                                end_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"创建新记录时处理end_date出错: {str(e)}")
+                    
+                    new_med_record = MedicationRecord(
+                        record_id=sql_record.id,
+                        prescription_id=record.get('prescription_id'),
+                        medication_name=med_data.get('medication_name', ''),
+                        dosage=med_data.get('dosage'),
+                        frequency=med_data.get('frequency'),
+                        start_date=start_date,
+                        end_date=end_date,
+                        instructions=med_data.get('instructions'),
+                        side_effects=med_data.get('side_effects'),
+                        is_prescribed=bool(record.get('prescription_id'))
+                    )
+                    db.session.add(new_med_record)
+                    current_app.logger.info(f"创建了处方记录 {new_med_record.medication_name}")
+            
+            # 更新生命体征记录 (MySQL)
+            if 'vital_signs' in update_data and record.get('record_type') == 'VITAL_SIGN':
+                # 获取现有的生命体征记录
+                existing_vitals = VitalSign.query.filter_by(record_id=sql_record.id).all()
+                
+                # 创建类型到记录的映射
+                existing_vitals_map = {f"{v.type}_{v.measured_at.isoformat() if v.measured_at else ''}": v for v in existing_vitals}
+                
+                # 更新或创建每个生命体征
+                for vs_data in update_data['vital_signs']:
+                    measured_at = None
+                    if vs_data.get('measured_at'):
+                        try:
+                            measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S.%f')
+                        except ValueError:
+                            try:
+                                measured_at = datetime.strptime(vs_data.get('measured_at'), '%Y-%m-%dT%H:%M:%S')
+                            except ValueError:
+                                measured_at = datetime.now()
+                    else:
+                        measured_at = datetime.now()
+                    
+                    # 创建键以查找现有记录
+                    vs_key = f"{vs_data.get('type')}_{measured_at.isoformat() if measured_at else ''}"
+                    
+                    if vs_key in existing_vitals_map:
+                        # 更新现有记录
+                        vital = existing_vitals_map[vs_key]
+                        vital.value = float(vs_data.get('value', 0))
+                        vital.unit = vs_data.get('unit')
+                        vital.notes = vs_data.get('notes')
+                        current_app.logger.info(f"更新了生命体征记录 {vital.type}: {vital.value} {vital.unit}")
+                    else:
+                        # 创建新记录
+                        new_vital = VitalSign(
+                            record_id=sql_record.id,
+                            type=vs_data.get('type', ''),
+                            value=float(vs_data.get('value', 0)),
+                            unit=vs_data.get('unit'),
+                            measured_at=measured_at,
+                            notes=vs_data.get('notes')
+                        )
+                        db.session.add(new_vital)
+                        current_app.logger.info(f"创建了生命体征记录 {new_vital.type}: {new_vital.value} {new_vital.unit}")
+            
             db.session.commit()
         else:
             # 如果不存在，创建一个新的
@@ -576,6 +867,88 @@ def update_health_record(record_id):
             if mongo_record:
                 new_sql_record = HealthRecord.from_mongo_doc(mongo_record)
                 db.session.add(new_sql_record)
+                db.session.commit()
+                
+                # 如果是处方或生命体征记录，添加对应的MySQL表记录
+                if record.get('record_type') == 'PRESCRIPTION' and record.get('medication'):
+                    med_data = record.get('medication')
+                    
+                    # 确保日期格式正确
+                    start_date = None
+                    end_date = None
+                    
+                    # 处理开始日期
+                    if isinstance(med_data.get('start_date'), date):
+                        start_date = med_data.get('start_date')
+                    elif isinstance(med_data.get('start_date'), datetime):
+                        start_date = med_data.get('start_date').date()
+                    elif isinstance(med_data.get('start_date'), str):
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    start_date = datetime.strptime(med_data.get('start_date'), fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if start_date is None and 'T' in med_data.get('start_date'):
+                                date_part = med_data.get('start_date').split('T')[0]
+                                start_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"MongoDB记录同步时处理start_date出错: {str(e)}")
+                    
+                    # 处理结束日期
+                    if isinstance(med_data.get('end_date'), date):
+                        end_date = med_data.get('end_date')
+                    elif isinstance(med_data.get('end_date'), datetime):
+                        end_date = med_data.get('end_date').date()
+                    elif isinstance(med_data.get('end_date'), str):
+                        try:
+                            # 尝试多种日期格式
+                            date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                            for fmt in date_formats:
+                                try:
+                                    end_date = datetime.strptime(med_data.get('end_date'), fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            
+                            # 如果所有格式都失败，尝试去除时间部分
+                            if end_date is None and 'T' in med_data.get('end_date'):
+                                date_part = med_data.get('end_date').split('T')[0]
+                                end_date = datetime.strptime(date_part, '%Y-%m-%d').date()
+                        except Exception as e:
+                            current_app.logger.warning(f"MongoDB记录同步时处理end_date出错: {str(e)}")
+                    
+                    new_med_record = MedicationRecord(
+                        record_id=new_sql_record.id,
+                        prescription_id=record.get('prescription_id'),
+                        medication_name=med_data.get('medication_name', ''),
+                        dosage=med_data.get('dosage'),
+                        frequency=med_data.get('frequency'),
+                        start_date=start_date,
+                        end_date=end_date,
+                        instructions=med_data.get('instructions'),
+                        side_effects=med_data.get('side_effects'),
+                        is_prescribed=bool(record.get('prescription_id'))
+                    )
+                    db.session.add(new_med_record)
+                
+                if record.get('record_type') == 'VITAL_SIGN' and record.get('vital_signs'):
+                    for vs_data in record.get('vital_signs', []):
+                        new_vital = VitalSign(
+                            record_id=new_sql_record.id,
+                            type=vs_data.get('type', ''),
+                            value=float(vs_data.get('value', 0)),
+                            unit=vs_data.get('unit'),
+                            measured_at=vs_data.get('measured_at') if isinstance(vs_data.get('measured_at'), datetime) else datetime.now(),
+                            notes=vs_data.get('notes')
+                        )
+                        db.session.add(new_vital)
+                
                 db.session.commit()
         
         # 获取更新后的记录
@@ -2986,10 +3359,24 @@ def create_record_version(record_id):
             for date_field in ['start_date', 'end_date']:
                 if date_field in med_data and med_data[date_field]:
                     try:
-                        medication_update[f'medication.{date_field}'] = datetime.strptime(med_data[date_field], '%Y-%m-%d')
-                    except:
-                        pass
-            
+                        # 尝试多种日期格式
+                        date_formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']
+                        for fmt in date_formats:
+                            try:
+                                date_value = datetime.strptime(med_data[date_field], fmt).date()
+                                medication_update[f'medication.{date_field}'] = date_value
+                                break
+                            except ValueError:
+                                continue
+                        
+                        # 如果所有格式都失败，尝试去除时间部分
+                        if f'medication.{date_field}' not in medication_update and 'T' in med_data[date_field]:
+                            date_part = med_data[date_field].split('T')[0]
+                            date_value = datetime.strptime(date_part, '%Y-%m-%d').date()
+                            medication_update[f'medication.{date_field}'] = date_value
+                    except Exception as e:
+                        current_app.logger.warning(f"更新记录时处理{date_field}出错: {str(e)}, 跳过该字段")
+                        
             update_fields.update(medication_update)
         
         # 设置更新时间

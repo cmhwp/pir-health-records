@@ -1,24 +1,48 @@
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, send_file
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
-from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo, Institution, CustomRecordType
+from ..models import db, User, Role, PatientInfo, DoctorInfo, ResearcherInfo, Institution, CustomRecordType, ExportTask, ExportStatus
 from ..routers.auth import role_required, api_login_required
 from sqlalchemy import or_, and_
 import os
 import json
 import time
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, date
 from sqlalchemy.sql import func, distinct, desc
-from ..utils.log_utils import log_admin, add_system_log
+from ..utils.log_utils import log_admin, add_system_log, log_export
 from ..models.log import LogType
-from ..models.batch_jobs import (
-    BatchJob, BatchJobLog, BatchJobError, 
-    BatchStatus, BatchType, LogLevel,
-    add_batch_log, add_batch_error,
-    get_batch_job_by_job_id, get_batch_jobs_by_status
-)
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
+
+# 处理日期时间字段函数
+def process_datetime_fields(data_list):
+    """
+    递归处理列表或字典中的所有datetime和date对象，转换为ISO格式字符串
+    
+    参数:
+        data_list: 要处理的数据列表或字典
+        
+    返回:
+        处理后的数据
+    """
+    if isinstance(data_list, list):
+        return [process_datetime_fields(item) for item in data_list]
+    elif isinstance(data_list, dict):
+        result = {}
+        for key, value in data_list.items():
+            if isinstance(value, (datetime, date)):
+                result[key] = value.isoformat()
+            elif isinstance(value, dict):
+                result[key] = process_datetime_fields(value)
+            elif isinstance(value, list):
+                result[key] = process_datetime_fields(value)
+            else:
+                result[key] = value
+        return result
+    else:
+        # 如果既不是列表也不是字典，直接返回
+        return data_list
 
 # 获取所有用户列表
 @admin_bp.route('/users', methods=['GET'])
@@ -750,12 +774,12 @@ def get_user_activity():
          .limit(10).all()
         
         active_users_data = [{
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'role': str(user.role.value),
-            'activity_count': activity_count
-        } for user, activity_count in active_users]
+            'id': row[0],  # User.id
+            'username': row[1],  # User.username
+            'email': row[2],  # User.email
+            'role': str(row[3].value),  # User.role.value
+            'activity_count': row[4]  # 活动计数
+        } for row in active_users]
         
         return jsonify({
             'success': True,
@@ -773,148 +797,6 @@ def get_user_activity():
             'message': f'获取用户活动统计失败: {str(e)}'
         }), 500
 
-# 批量管理记录
-@admin_bp.route('/records/batch', methods=['POST'])
-@api_login_required
-@role_required(Role.ADMIN)
-def batch_manage_records():
-    try:
-        data = request.json
-        
-        if not data or 'action' not in data or 'record_ids' not in data:
-            return jsonify({
-                'success': False,
-                'message': '缺少必要参数 (action, record_ids)'
-            }), 400
-            
-        action = data['action']
-        record_ids = data['record_ids']
-        
-        if not record_ids or not isinstance(record_ids, list):
-            return jsonify({
-                'success': False,
-                'message': 'record_ids必须是非空列表'
-            }), 400
-            
-        # 根据不同的操作执行不同的逻辑
-        if action == 'delete':
-            # 标记删除记录
-            from ..models.health_records import format_mongo_id
-            from ..utils.mongo_utils import get_mongo_db
-            
-            mongo_db = get_mongo_db()
-            deleted_count = 0
-            deleted_records = []
-            
-            for record_id in record_ids:
-                mongo_id = format_mongo_id(record_id)
-                if not mongo_id:
-                    continue
-                    
-                # 获取记录
-                record = mongo_db.health_records.find_one({'_id': mongo_id})
-                if not record:
-                    continue
-                
-                # 记录删除信息以便日志记录
-                deleted_records.append({
-                    'record_id': str(record['_id']),
-                    'patient_id': record.get('patient_id'),
-                    'record_type': record.get('record_type'),
-                    'record_date': str(record.get('record_date'))
-                })
-                    
-                # 备份到删除集合
-                record['deletion_time'] = datetime.now()
-                record['deleted_by'] = current_user.id
-                record['deletion_reason'] = data.get('reason', '管理员批量删除')
-                
-                mongo_db.health_records_deleted.insert_one(record)
-                mongo_db.health_records.delete_one({'_id': mongo_id})
-                
-                deleted_count += 1
-                
-            # 记录批量删除操作的日志
-            log_admin(
-                message=f'管理员批量删除健康记录',
-                details=json.dumps({
-                    'action': 'delete',
-                    'deleted_count': deleted_count,
-                    'record_ids': record_ids,
-                    'deleted_records': deleted_records,
-                    'reason': data.get('reason', '管理员批量删除'),
-                    'admin_username': current_user.username,
-                    'ip_address': request.remote_addr
-                })
-            )
-                
-            return jsonify({
-                'success': True,
-                'message': f'成功删除{deleted_count}条记录',
-                'data': {
-                    'deleted_count': deleted_count
-                }
-            })
-        
-        elif action == 'visibility':
-            # 修改记录可见性
-            if 'visibility' not in data:
-                return jsonify({
-                    'success': False,
-                    'message': '缺少visibility参数'
-                }), 400
-                
-            visibility = data['visibility']
-            
-            # 验证可见性值
-            from ..models import RecordVisibility
-            try:
-                RecordVisibility(visibility)
-            except ValueError:
-                return jsonify({
-                    'success': False,
-                    'message': f'无效的可见性值: {visibility}'
-                }), 400
-                
-            # 执行批量更新
-            from ..models.health_records import bulk_update_visibility
-            
-            updated_count = bulk_update_visibility(record_ids, visibility, current_user.id)
-            
-            # 记录批量更新可见性的日志
-            log_admin(
-                message=f'管理员批量更新记录可见性',
-                details=json.dumps({
-                    'action': 'visibility',
-                    'updated_count': updated_count,
-                    'record_ids': record_ids,
-                    'new_visibility': visibility,
-                    'admin_username': current_user.username,
-                    'ip_address': request.remote_addr
-                })
-            )
-            
-            return jsonify({
-                'success': True,
-                'message': f'批量更新可见性成功，共更新{updated_count}条记录',
-                'data': {
-                    'updated_count': updated_count
-                }
-            })
-            
-        else:
-            return jsonify({
-                'success': False,
-                'message': f'不支持的操作: {action}'
-            }), 400
-            
-    except Exception as e:
-        current_app.logger.error(f"批量管理记录失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'批量管理记录失败: {str(e)}'
-        }), 500
-
 # 导出系统数据
 @admin_bp.route('/export/data', methods=['POST'])
 @api_login_required
@@ -929,6 +811,18 @@ def export_system_data():
             }), 400
             
         export_type = data.get('export_type')
+        export_format = data.get('format', 'json')  # 默认为JSON格式
+        options = data.get('options', {})
+        
+        # 检查是否需要匿名化数据 - 适应前端传递的不同格式
+        if isinstance(options, list):
+            anonymize_data = 'anonymize' in options
+        elif isinstance(options, dict):
+            anonymize_data = options.get('anonymize', False)
+        else:
+            anonymize_data = False
+            
+        current_app.logger.debug(f"数据导出选项: {options}, 是否匿名化: {anonymize_data}")
         
         # 创建导出目录
         export_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads/exports')
@@ -940,112 +834,435 @@ def export_system_data():
         
         # 生成导出文件名
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        filename = f"system_export_{export_type}_{timestamp}_{token}.json"
+        export_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"  # 生成唯一导出ID
+        
+        # 文件扩展名
+        file_extension = export_format.lower()
+        if file_extension == 'excel':
+            file_extension = 'xlsx'  # 使用正确的Excel文件扩展名
+        filename = f"system_export_{export_type}_{timestamp}_{token}.{file_extension}"
         filepath = os.path.join(export_dir, filename)
+        
+        # 创建导出任务记录
+        export_task = ExportTask(
+            export_id=export_id,
+            user_id=current_user.id,
+            export_type=export_type,
+            format=export_format,
+            status=ExportStatus.PROCESSING,  # 设为正在处理状态
+            started_at=datetime.now(),
+            filename=filename,
+            file_path=filepath,
+            options=options,  # 直接存储前端传递的options对象
+            parameters=data
+        )
+        
+        db.session.add(export_task)
+        db.session.flush()  # 获取ID但不提交事务
         
         # 导出信息以便日志记录
         export_info = {
+            'export_id': export_id,
             'export_type': export_type,
+            'format': export_format,
             'filename': filename,
             'timestamp': datetime.now().isoformat(),
             'parameters': data,
-            'token': token
+            'token': token,
+            'options': options
         }
         
-        # 根据类型导出不同的数据
-        if export_type == 'users':
-            # 导出用户数据
-            users = User.query.all()
-            export_data = [user.to_dict() for user in users]
-            export_info['record_count'] = len(export_data)
-            
-        elif export_type == 'health_records':
-            # 导出健康记录数据
-            patient_id = data.get('patient_id')
-            limit = data.get('limit', 1000)
-            
-            from ..utils.mongo_utils import get_mongo_db
-            
-            mongo_db = get_mongo_db()
-            query = {}
-            
-            if patient_id:
-                query['patient_id'] = patient_id
-                export_info['patient_id'] = patient_id
+        try:
+            # 根据类型导出不同的数据
+            if export_type == 'users':
+                # 导出用户数据
+                users = User.query.all()
+                export_data = [user.to_dict() for user in users]
                 
-            cursor = mongo_db.health_records.find(query).limit(limit)
-            export_data = [record for record in cursor]
-            
-            # 处理ObjectId格式
-            for record in export_data:
-                record['_id'] = str(record['_id'])
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
                 
-            export_info['record_count'] = len(export_data)
-            export_info['limit'] = limit
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for user_data in export_data:
+                        # 匿名化用户邮箱
+                        if 'email' in user_data:
+                            parts = user_data['email'].split('@')
+                            if len(parts) > 1:
+                                domain = parts[1]
+                                user_data['email'] = f"user_{user_data['id']}@{domain}"
+                        
+                        # 匿名化电话号码
+                        if 'phone' in user_data and user_data['phone']:
+                            user_data['phone'] = f"****{user_data['phone'][-4:]}" if len(user_data['phone']) >= 4 else "********"
+                        
+                        # 匿名化全名
+                        if 'full_name' in user_data and user_data['full_name']:
+                            user_data['full_name'] = f"用户_{user_data['id']}"
                 
-        elif export_type == 'system_logs':
-            # 导出系统日志
-            from ..models.log import SystemLog
-            
-            start_date = data.get('start_date')
-            end_date = data.get('end_date')
-            
-            query = SystemLog.query
-            
-            if start_date:
-                try:
-                    start_datetime = datetime.fromisoformat(start_date)
-                    query = query.filter(SystemLog.created_at >= start_datetime)
-                    export_info['start_date'] = start_date
-                except ValueError:
-                    pass
+                export_info['record_count'] = len(export_data)
+                export_task.record_count = len(export_data)
+                
+            elif export_type == 'health_records':
+                # 导出健康记录数据
+                patient_id = data.get('patient_id')
+                limit = data.get('limit', 1000)
+                
+                from ..utils.mongo_utils import get_mongo_db
+                
+                mongo_db = get_mongo_db()
+                query = {}
+                
+                if patient_id:
+                    query['patient_id'] = patient_id
+                    export_info['patient_id'] = patient_id
                     
-            if end_date:
+                cursor = mongo_db.health_records.find(query).limit(limit)
+                export_data = [record for record in cursor]
+                
+                # 处理ObjectId格式和确保数据结构一致性
+                for record in export_data:
+                    record['_id'] = str(record['_id'])
+                    
+                    # 确保嵌套对象为可序列化对象
+                    if 'files' in record and record['files']:
+                        # 确保文件条目是简单对象
+                        simplified_files = []
+                        for file in record['files']:
+                            if isinstance(file, dict):
+                                # 只保留关键信息
+                                simplified_file = {
+                                    'filename': file.get('filename', ''),
+                                    'file_size': file.get('file_size', 0),
+                                    'file_type': file.get('file_type', ''),
+                                    'uploaded_at': str(file.get('uploaded_at', ''))
+                                }
+                                simplified_files.append(simplified_file)
+                        record['files'] = simplified_files
+                
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
+                
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for record in export_data:
+                        # 删除或混淆敏感字段
+                        if 'patient_name' in record:
+                            record['patient_name'] = f"患者_{record.get('patient_id', 'unknown')}"
+                        
+                        # 删除详细地址
+                        if 'address' in record:
+                            record['address'] = "****"
+                        
+                        # 处理其他敏感信息
+                        sensitive_fields = ['phone', 'contact_info', 'emergency_contact']
+                        for field in sensitive_fields:
+                            if field in record and record[field]:
+                                record[field] = "********"
+                
+                export_info['record_count'] = len(export_data)
+                export_info['limit'] = limit
+                export_task.record_count = len(export_data)
+                    
+            elif export_type == 'system_logs':
+                # 导出系统日志
+                from ..models.log import SystemLog
+                
+                start_date = data.get('start_date')
+                end_date = data.get('end_date')
+                
+                query = SystemLog.query
+                
+                if start_date:
+                    try:
+                        start_datetime = datetime.fromisoformat(start_date)
+                        query = query.filter(SystemLog.created_at >= start_datetime)
+                        export_info['start_date'] = start_date
+                    except ValueError:
+                        pass
+                        
+                if end_date:
+                    try:
+                        end_datetime = datetime.fromisoformat(end_date)
+                        query = query.filter(SystemLog.created_at <= end_datetime)
+                        export_info['end_date'] = end_date
+                    except ValueError:
+                        pass
+                
+                logs = query.order_by(SystemLog.created_at.desc()).all()
+                export_data = [log.to_dict() for log in logs]
+                
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
+                
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for log_data in export_data:
+                        # 匿名化IP地址
+                        if 'ip_address' in log_data and log_data['ip_address']:
+                            ip_parts = log_data['ip_address'].split('.')
+                            if len(ip_parts) == 4:
+                                log_data['ip_address'] = f"{ip_parts[0]}.{ip_parts[1]}.*.*"
+                        
+                        # 匿名化详细信息
+                        if 'details' in log_data and isinstance(log_data['details'], dict):
+                            # 删除敏感详情
+                            if 'user_agent' in log_data['details']:
+                                log_data['details']['user_agent'] = "[已匿名化]"
+                            if 'ip_address' in log_data['details']:
+                                ip_parts = log_data['details']['ip_address'].split('.')
+                                if len(ip_parts) == 4:
+                                    log_data['details']['ip_address'] = f"{ip_parts[0]}.{ip_parts[1]}.*.*"
+                
+                export_info['record_count'] = len(export_data)
+                export_task.record_count = len(export_data)
+                
+            elif export_type == 'medications':
+                # 导出药物数据
+                from ..models.health_records import MedicationRecord
+                
+                # 获取所有处方信息
+                medications = MedicationRecord.query.all()
+                medication_data = []
+                
+                for medication in medications:
+                    # 直接使用to_dict转换，不尝试获取关联项目
+                    medication_dict = medication.to_dict()
+                    
+                    # 获取相关的健康记录信息
+                    if medication.health_record:
+                        medication_dict['health_record'] = {
+                            'id': medication.health_record.id,
+                            'title': medication.health_record.title,
+                            'record_type': medication.health_record.record_type,
+                            'record_date': medication.health_record.record_date.isoformat() if medication.health_record.record_date else None,
+                            'mongo_id': medication.health_record.mongo_id
+                        }
+                    
+                    medication_data.append(medication_dict)
+                
+                export_data = medication_data
+                
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
+                
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for prescription in export_data:
+                        # 匿名化患者和医生信息
+                        if 'patient_name' in prescription:
+                            prescription['patient_name'] = f"患者_{prescription.get('patient_id', 'unknown')}"
+                        if 'doctor_name' in prescription:
+                            prescription['doctor_name'] = f"医生_{prescription.get('doctor_id', 'unknown')}"
+                        # 如果包含健康记录，也匿名化其中的信息
+                        if 'health_record' in prescription and isinstance(prescription['health_record'], dict):
+                            if 'patient_name' in prescription['health_record']:
+                                prescription['health_record']['patient_name'] = f"患者_{prescription['health_record'].get('patient_id', 'unknown')}"
+                
+                export_info['record_count'] = len(export_data)
+                export_task.record_count = len(export_data)
+                
+            elif export_type == 'vitals':
+                # 导出生命体征数据
+                from ..models.health_records import VitalSign
+                
+                vitals = VitalSign.query.all()
+                export_data = [vital.to_dict() for vital in vitals]
+                
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
+                
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for vital in export_data:
+                        # 仅保留记录ID和测量值，移除患者识别信息
+                        if 'patient_id' in vital:
+                            vital['patient_id'] = str(vital['patient_id'])  # 转为字符串但不匿名化，因为这是外键
+                        if 'patient_name' in vital:
+                            vital['patient_name'] = f"患者_{vital.get('patient_id', 'unknown')}"
+                
+                export_info['record_count'] = len(export_data)
+                export_task.record_count = len(export_data)
+                
+            elif export_type == 'labs':
+                # 导出实验室项目数据
+                # 这里需要根据实际的实验室数据模型调整
+                # 假设有一个LabResult模型
                 try:
-                    end_datetime = datetime.fromisoformat(end_date)
-                    query = query.filter(SystemLog.created_at <= end_datetime)
-                    export_info['end_date'] = end_date
-                except ValueError:
-                    pass
+                    from ..models.researcher import ResearchProject
+                    research_projects = ResearchProject.query.all()
+                    export_data = [project.to_dict() for project in research_projects]
+                except ImportError:
+                    # 如果模型不存在，可以从MongoDB获取
+                    from ..utils.mongo_utils import get_mongo_db
+                    mongo_db = get_mongo_db()
+                    export_data = list(mongo_db.lab_results.find())
+                    for record in export_data:
+                        record['_id'] = str(record['_id'])
+                
+                # 处理日期时间对象
+                export_data = process_datetime_fields(export_data)
+                
+                # 如果需要匿名化，处理敏感字段
+                if anonymize_data:
+                    for result in export_data:
+                        # 匿名化患者信息
+                        if 'patient_name' in result:
+                            result['patient_name'] = f"患者_{result.get('patient_id', 'unknown')}"
+                        if 'doctor_name' in result:
+                            result['doctor_name'] = f"医生_{result.get('doctor_id', 'unknown')}"
+                        # 安全处理 team_members，确保它是列表而不是对象
+                        if 'team_members' in result and result['team_members'] is not None:
+                            # 检查是否已经是字典列表
+                            if isinstance(result['team_members'], list):
+                                processed_members = []
+                                for member in result['team_members']:
+                                    # 如果成员是字典，直接使用
+                                    if isinstance(member, dict):
+                                        processed_members.append(member)
+                                    # 如果成员有to_dict方法，调用它
+                                    elif hasattr(member, 'to_dict') and callable(getattr(member, 'to_dict')):
+                                        processed_members.append(member.to_dict())
+                                    # 如果都不是，跳过此成员
+                                    else:
+                                        current_app.logger.warning(f"跳过不支持的成员类型: {type(member)}")
+                                result['team_members'] = processed_members
+                
+                export_info['record_count'] = len(export_data)
+                export_task.record_count = len(export_data)
+                
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'不支持的导出类型: {export_type}'
+                }), 400
+                
+            # 根据格式导出数据
+            if export_format == 'json':
+                # 写入JSON文件
+                class DateTimeEncoder(json.JSONEncoder):
+                    def default(self, obj):
+                        if isinstance(obj, (datetime, date)):
+                            return obj.isoformat()
+                        return super().default(obj)
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=2, cls=DateTimeEncoder)
+            elif export_format == 'csv':
+                # 导出为CSV
+                import csv
+                with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                    if export_data and len(export_data) > 0:
+                        # 扁平化和预处理数据
+                        processed_data = []
+                        for item in export_data:
+                            # 复制数据以避免修改原始数据
+                            processed_item = {}
+                            for key, value in item.items():
+                                # 对于嵌套字典或列表，转换为JSON字符串
+                                if isinstance(value, (dict, list)):
+                                    processed_item[key] = json.dumps(value, ensure_ascii=False)
+                                else:
+                                    processed_item[key] = value
+                            processed_data.append(processed_item)
+                        
+                        # 提取所有可能的字段
+                        all_fields = set()
+                        for item in processed_data:
+                            all_fields.update(item.keys())
+                        
+                        # 按字母顺序排序字段
+                        fieldnames = sorted(list(all_fields))
+                        
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)   
+                        writer.writeheader()
+                        writer.writerows(processed_data)
+            elif export_format == 'excel':
+                # 导出为Excel
+                import pandas as pd
+                
+                # 扁平化和预处理数据
+                processed_data = []
+                for item in export_data:
+                    # 复制数据以避免修改原始数据
+                    processed_item = {}
+                    for key, value in item.items():
+                        # 对于嵌套字典或列表，转换为JSON字符串
+                        if isinstance(value, (dict, list)):
+                            processed_item[key] = json.dumps(value, ensure_ascii=False)
+                        else:
+                            processed_item[key] = value
+                    processed_data.append(processed_item)
+                
+                df = pd.DataFrame(processed_data)
+                df.to_excel(filepath, index=False, engine='openpyxl')
+            else:
+                # 默认使用JSON格式
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=2, default=str)
+                    
+            # 更新文件大小
+            file_size = os.path.getsize(filepath)
+            export_task.file_size = file_size
+            export_info['file_size'] = file_size
             
-            logs = query.order_by(SystemLog.created_at.desc()).all()
-            export_data = [log.to_dict() for log in logs]
-            export_info['record_count'] = len(export_data)
+            # 更新导出任务状态为完成
+            export_task.status = ExportStatus.COMPLETED
+            export_task.completed_at = datetime.now()
             
-        else:
+            # 是否进行了匿名化操作
+            if anonymize_data:
+                export_task.notes = "数据已匿名化处理"
+                export_info['anonymized'] = True
+            
+            # 记录数据导出日志
+            log_export(
+                message=f'管理员导出{export_type}数据',
+                details=json.dumps({
+                    'export_info': export_info,
+                    'admin_username': current_user.username,
+                    'file_size': file_size,
+                    'ip_address': request.remote_addr
+                }),
+                user_id=current_user.id
+            )
+            
+        except Exception as e:
+            # 出现错误，更新导出任务状态为失败
+            export_task.status = ExportStatus.FAILED
+            export_task.error_message = str(e)
+            export_task.completed_at = datetime.now()
+            
+            # 记录错误日志
+            current_app.logger.error(f"导出{export_type}数据失败: {str(e)}")
+            add_system_log(LogType.ERROR, f"导出{export_type}数据失败", details=str(e))
+            
+            db.session.commit()
+            
             return jsonify({
                 'success': False,
-                'message': f'不支持的导出类型: {export_type}'
-            }), 400
-            
-        # 写入文件
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(export_data, f, ensure_ascii=False, indent=2, default=str)
-            
-        # 记录数据导出日志
-        log_admin(
-            message=f'管理员导出{export_type}数据',
-            details=json.dumps({
-                'export_info': export_info,
-                'admin_username': current_user.username,
-                'file_size': os.path.getsize(filepath),
-                'ip_address': request.remote_addr
-            })
-        )
+                'message': f'导出{export_type}数据失败: {str(e)}'
+            }), 500
+        
+        # 提交事务，保存导出任务记录
+        db.session.commit()
             
         # 返回下载链接
-        download_url = f"/admin/export/download/{filename}"
+        download_url = f"/api/admin/export/download/{filename}"
         
         return jsonify({
             'success': True,
             'message': f'成功导出{export_type}数据',
             'data': {
+                'export_id': export_id,
                 'filename': filename,
                 'download_url': download_url,
-                'record_count': len(export_data)
+                'record_count': export_task.record_count,
+                'file_size': export_task.file_size
             }
         })
     except Exception as e:
+        db.session.rollback()
         current_app.logger.error(f"导出系统数据失败: {str(e)}")
         return jsonify({
             'success': False,
@@ -1107,6 +1324,248 @@ def download_exported_data(filename):
         return jsonify({
             'success': False,
             'message': f'下载导出数据失败: {str(e)}'
+        }), 500
+
+# 获取导出任务历史
+@admin_bp.route('/export/history', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_export_history():
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        export_type = request.args.get('type', '')
+        status = request.args.get('status', '')
+        
+        # 构建查询
+        query = ExportTask.query
+        
+        # 按导出类型过滤
+        if export_type:
+            query = query.filter(ExportTask.export_type == export_type)
+        
+        # 按状态过滤
+        if status:
+            try:
+                status_enum = ExportStatus(status)
+                query = query.filter(ExportTask.status == status_enum)
+            except ValueError:
+                pass  # 忽略无效状态
+        
+        # 分页查询
+        pagination = query.order_by(ExportTask.created_at.desc()).paginate(page=page, per_page=per_page)
+        
+        # 准备结果集
+        export_history = []
+        for task in pagination.items:
+            # 获取导出用户信息
+            user = User.query.get(task.user_id)
+            export_data = task.to_dict()
+            
+            # 添加用户信息
+            if user:
+                export_data['exportedBy'] = user.username
+            else:
+                export_data['exportedBy'] = f"用户ID {task.user_id}"
+                
+            # 格式化选项列表
+            if isinstance(task.options, dict) and 'options' in task.options:
+                export_data['options'] = task.options.get('options', [])
+            
+            export_history.append(export_data)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'exportHistory': export_history,
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'current_page': page
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取导出历史失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取导出历史失败: {str(e)}'
+        }), 500
+
+# 获取导出任务详情
+@admin_bp.route('/export/<export_id>', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_export_details(export_id):
+    try:
+        # 查找导出任务
+        export_task = ExportTask.query.filter_by(export_id=export_id).first()
+        
+        if not export_task:
+            return jsonify({
+                'success': False,
+                'message': '导出任务不存在'
+            }), 404
+        
+        # 获取导出用户信息
+        user = User.query.get(export_task.user_id)
+        export_data = export_task.to_dict()
+        
+        # 添加用户信息
+        if user:
+            export_data['exportedBy'] = user.username
+            export_data['exportedByFullName'] = user.full_name
+            export_data['exportedByEmail'] = user.email
+        else:
+            export_data['exportedBy'] = f"用户ID {export_task.user_id}"
+        
+        # 检查导出文件是否存在
+        if export_task.file_path and os.path.exists(export_task.file_path):
+            export_data['fileExists'] = True
+            export_data['fileSize'] = os.path.getsize(export_task.file_path)
+            export_data['downloadUrl'] = f"/admin/export/download/{export_task.filename}"
+        else:
+            export_data['fileExists'] = False
+        
+        # 获取相关日志
+        from ..models.log import SystemLog, LogType
+        logs = SystemLog.query.filter(
+            SystemLog.log_type == LogType.EXPORT,
+            SystemLog.details.like(f'%{export_id}%')
+        ).order_by(SystemLog.created_at.desc()).limit(5).all()
+        
+        export_data['logs'] = [log.to_dict() for log in logs]
+        
+        return jsonify({
+            'success': True,
+            'data': export_data
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取导出任务详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取导出任务详情失败: {str(e)}'
+        }), 500
+
+# 取消导出任务
+@admin_bp.route('/export/<export_id>/cancel', methods=['POST'])
+@api_login_required
+@role_required(Role.ADMIN)
+def cancel_export_task(export_id):
+    try:
+        # 查找导出任务
+        export_task = ExportTask.query.filter_by(export_id=export_id).first()
+        
+        if not export_task:
+            return jsonify({
+                'success': False,
+                'message': '导出任务不存在'
+            }), 404
+        
+        # 只能取消处理中或等待中的任务
+        if export_task.status not in [ExportStatus.PENDING, ExportStatus.PROCESSING]:
+            return jsonify({
+                'success': False,
+                'message': f'无法取消{export_task.status.value}状态的任务'
+            }), 400
+        
+        # 更新任务状态
+        export_task.status = ExportStatus.FAILED
+        export_task.error_message = '管理员手动取消任务'
+        export_task.completed_at = datetime.now()
+        
+        # 记录取消操作
+        log_admin(
+            message=f'管理员取消了导出任务: {export_id}',
+            details=json.dumps({
+                'export_id': export_id,
+                'export_type': export_task.export_type,
+                'admin_username': current_user.username,
+                'cancel_time': datetime.now().isoformat(),
+                'previous_status': str(export_task.status)
+            }),
+            user_id=current_user.id
+        )
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': '导出任务已取消',
+            'data': {
+                'export_id': export_id,
+                'status': str(export_task.status)
+            }
+        })
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"取消导出任务失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'取消导出任务失败: {str(e)}'
+        }), 500
+
+# 删除导出任务
+@admin_bp.route('/export/<export_id>', methods=['DELETE'])
+@api_login_required
+@role_required(Role.ADMIN)
+def delete_export_task(export_id):
+    try:
+        # 查找导出任务
+        export_task = ExportTask.query.filter_by(export_id=export_id).first()
+        
+        if not export_task:
+            return jsonify({
+                'success': False,
+                'message': '导出任务不存在'
+            }), 404
+        
+        # 保存任务信息用于日志记录
+        task_info = {
+            'export_id': export_id,
+            'export_type': export_task.export_type,
+            'filename': export_task.filename,
+            'status': str(export_task.status),
+            'created_at': export_task.created_at.isoformat() if export_task.created_at else None
+        }
+        
+        # 检查是否需要删除文件
+        should_delete_file = request.args.get('delete_file', 'false').lower() == 'true'
+        
+        if should_delete_file and export_task.file_path and os.path.exists(export_task.file_path):
+            try:
+                os.remove(export_task.file_path)
+                task_info['file_deleted'] = True
+            except Exception as e:
+                current_app.logger.error(f"删除导出文件失败: {str(e)}")
+                task_info['file_deleted'] = False
+                task_info['file_error'] = str(e)
+        
+        # 删除数据库记录
+        db.session.delete(export_task)
+        db.session.commit()
+        
+        # 记录删除操作
+        log_admin(
+            message=f'管理员删除了导出任务: {export_id}',
+            details=json.dumps({
+                'task_info': task_info,
+                'admin_username': current_user.username,
+                'deletion_time': datetime.now().isoformat(),
+                'deleted_file': should_delete_file
+            }),
+            user_id=current_user.id
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '导出任务已删除',
+            'data': task_info
+        })
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"删除导出任务失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'删除导出任务失败: {str(e)}'
         }), 500
 
 # 获取系统设置
@@ -1447,591 +1906,7 @@ def admin_dashboard():
             'success': False,
             'message': f'获取管理员仪表盘数据失败: {str(e)}'
         }), 500
-
-# 获取批量任务列表
-@admin_bp.route('/batch-records', methods=['GET'])
-@api_login_required
-@role_required(Role.ADMIN)
-def get_batch_jobs():
-    try:
-        status = request.args.get('status')
-        
-        # 如果提供了状态，则按状态筛选
-        if status:
-            try:
-                batch_jobs = get_batch_jobs_by_status(status)
-            except ValueError:
-                return jsonify({
-                    'success': False,
-                    'message': f'无效的状态值: {status}'
-                }), 400
-        else:
-            # 否则获取所有任务
-            batch_jobs = BatchJob.query.order_by(BatchJob.created_at.desc()).all()
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'batch_jobs': [job.to_dict() for job in batch_jobs]
-            }
-        })
-    except Exception as e:
-        current_app.logger.error(f"获取批量任务列表失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取批量任务列表失败: {str(e)}'
-        }), 500
-
-# 获取批量任务详情
-@admin_bp.route('/batch-records/<job_id>', methods=['GET'])
-@api_login_required
-@role_required(Role.ADMIN)
-def get_batch_job(job_id):
-    try:
-        batch_job = get_batch_job_by_job_id(job_id)
-        
-        if not batch_job:
-            return jsonify({
-                'success': False,
-                'message': f'未找到ID为{job_id}的批量任务'
-            }), 404
-            
-        # 获取任务日志
-        logs = BatchJobLog.query.filter_by(batch_job_id=batch_job.id)\
-            .order_by(BatchJobLog.timestamp.desc()).all()
-            
-        # 获取任务错误
-        errors = BatchJobError.query.filter_by(batch_job_id=batch_job.id)\
-            .order_by(BatchJobError.timestamp.desc()).all()
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'batch_job': batch_job.to_dict(),
-                'logs': [log.to_dict() for log in logs],
-                'errors': [error.to_dict() for error in errors]
-            }
-        })
-    except Exception as e:
-        current_app.logger.error(f"获取批量任务详情失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'获取批量任务详情失败: {str(e)}'
-        }), 500
-
-# 上传批量数据文件
-@admin_bp.route('/batch-records/upload', methods=['POST'])
-@api_login_required
-@role_required(Role.ADMIN)
-def upload_batch_file():
-    try:
-        if 'file' not in request.files:
-            return jsonify({
-                'success': False,
-                'message': '没有上传文件'
-            }), 400
-            
-        file = request.files['file']
-        
-        if file.filename == '':
-            return jsonify({
-                'success': False,
-                'message': '未选择文件'
-            }), 400
-            
-        # 验证文件类型
-        allowed_extensions = {'csv', 'json', 'xml'}
-        file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-        
-        if file_ext not in allowed_extensions:
-            return jsonify({
-                'success': False,
-                'message': f'不支持的文件类型: {file_ext}，仅支持 CSV、JSON 或 XML'
-            }), 400
-            
-        # 获取表单数据
-        name = request.form.get('name')
-        batch_type = request.form.get('type')
-        validate_only = request.form.get('validateOnly') == 'true'
-        skip_duplicates = request.form.get('skipDuplicates') == 'true'
-        
-        if not name or not batch_type:
-            return jsonify({
-                'success': False,
-                'message': '缺少必要参数 (name, type)'
-            }), 400
-        
-        # 保存文件
-        uploads_dir = os.path.join(current_app.instance_path, 'uploads', 'batch_files')
-        os.makedirs(uploads_dir, exist_ok=True)
-        
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        safe_filename = f"{timestamp}_{secure_filename(file.filename)}"
-        file_path = os.path.join(uploads_dir, safe_filename)
-        
-        file.save(file_path)
-        
-        # 创建批量任务记录
-        options = {
-            'validateOnly': validate_only,
-            'skipDuplicates': skip_duplicates
-        }
-        
-        batch_job = BatchJob(
-            name=name,
-            job_type=batch_type,
-            created_by_id=current_user.id,
-            file_name=file.filename,
-            file_path=file_path,
-            file_size=os.path.getsize(file_path),
-            file_type=file_ext,
-            options=options
-        )
-        
-        db.session.add(batch_job)
-        db.session.commit()
-        
-        # 添加日志
-        add_batch_log(
-            batch_job.id, 
-            f"批量任务创建成功: {name}", 
-            LogLevel.INFO,
-            {
-                'file_name': file.filename,
-                'file_size': batch_job.file_size,
-                'file_type': file_ext,
-                'options': options
-            }
-        )
-        
-        # 记录管理操作日志
-        log_admin(
-            message=f'创建批量任务: {name}',
-            details=json.dumps({
-                'job_id': batch_job.job_id,
-                'name': name,
-                'type': batch_type,
-                'file_name': file.filename,
-                'file_size': batch_job.file_size,
-                'options': options,
-                'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            })
-        )
-        
-        return jsonify({
-            'success': True,
-            'message': '批量任务创建成功',
-            'data': {
-                'batch_job': batch_job.to_dict()
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"上传批量数据文件失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'上传批量数据文件失败: {str(e)}'
-        }), 500
-
-# 开始处理批量任务
-@admin_bp.route('/batch-records/<job_id>/start', methods=['POST'])
-@api_login_required
-@role_required(Role.ADMIN)
-def start_batch_processing(job_id):
-    try:
-        batch_job = get_batch_job_by_job_id(job_id)
-        
-        if not batch_job:
-            return jsonify({
-                'success': False,
-                'message': f'未找到ID为{job_id}的批量任务'
-            }), 404
-            
-        if batch_job.status != BatchStatus.PENDING:
-            return jsonify({
-                'success': False,
-                'message': f'只能启动处于待处理状态的任务'
-            }), 400
-            
-        # 标记任务为处理中
-        batch_job.mark_processing()
-        
-        # 添加日志
-        add_batch_log(
-            batch_job.id, 
-            "开始处理批量任务", 
-            LogLevel.INFO
-        )
-        
-        # 启动后台任务处理
-        # 这里可以使用Celery或者其他异步任务系统
-        # 为了简单起见，这里使用线程池
-        from concurrent.futures import ThreadPoolExecutor
-        executor = ThreadPoolExecutor(max_workers=1)
-        executor.submit(process_batch_job, batch_job.id)
-        
-        # 记录管理操作日志
-        log_admin(
-            message=f'启动批量任务处理: {batch_job.name}',
-            details=json.dumps({
-                'job_id': batch_job.job_id,
-                'name': batch_job.name,
-                'type': batch_job.type.value,
-                'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            })
-        )
-        
-        return jsonify({
-            'success': True,
-            'message': '批量任务处理已启动',
-            'data': {
-                'batch_job': batch_job.to_dict()
-            }
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"启动批量任务处理失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'启动批量任务处理失败: {str(e)}'
-        }), 500
-
-# 删除批量任务
-@admin_bp.route('/batch-records/<job_id>', methods=['DELETE'])
-@api_login_required
-@role_required(Role.ADMIN)
-def delete_batch_job(job_id):
-    try:
-        batch_job = get_batch_job_by_job_id(job_id)
-        
-        if not batch_job:
-            return jsonify({
-                'success': False,
-                'message': f'未找到ID为{job_id}的批量任务'
-            }), 404
-            
-        if batch_job.status == BatchStatus.PROCESSING:
-            return jsonify({
-                'success': False,
-                'message': '无法删除处理中的任务'
-            }), 400
-            
-        # 记录要删除的批量任务信息（用于日志）
-        job_info = {
-            'job_id': batch_job.job_id,
-            'name': batch_job.name,
-            'type': batch_job.type.value,
-            'status': batch_job.status.value,
-            'created_at': batch_job.created_at.isoformat() if batch_job.created_at else None
-        }
-        
-        # 如果存在文件，则删除文件
-        if batch_job.file_path and os.path.exists(batch_job.file_path):
-            os.remove(batch_job.file_path)
-            
-        # 删除相关的日志和错误记录
-        BatchJobLog.query.filter_by(batch_job_id=batch_job.id).delete()
-        BatchJobError.query.filter_by(batch_job_id=batch_job.id).delete()
-        
-        # 删除批量任务
-        db.session.delete(batch_job)
-        db.session.commit()
-        
-        # 记录管理操作日志
-        log_admin(
-            message=f'删除批量任务: {job_info["name"]}',
-            details=json.dumps({
-                'job_info': job_info,
-                'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            })
-        )
-        
-        return jsonify({
-            'success': True,
-            'message': '批量任务已成功删除'
-        })
-        
-    except Exception as e:
-        current_app.logger.error(f"删除批量任务失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'删除批量任务失败: {str(e)}'
-        }), 500
-
-# 下载批量任务结果
-@admin_bp.route('/batch-records/<job_id>/download', methods=['GET'])
-@api_login_required
-@role_required(Role.ADMIN)
-def download_batch_results(job_id):
-    try:
-        batch_job = get_batch_job_by_job_id(job_id)
-        
-        if not batch_job:
-            return jsonify({
-                'success': False,
-                'message': f'未找到ID为{job_id}的批量任务'
-            }), 404
-            
-        if batch_job.status != BatchStatus.COMPLETED:
-            return jsonify({
-                'success': False,
-                'message': '只能下载已完成任务的结果'
-            }), 400
-            
-        # 结果文件路径
-        results_dir = os.path.join(current_app.instance_path, 'results', 'batch_jobs')
-        os.makedirs(results_dir, exist_ok=True)
-        
-        result_file_path = os.path.join(results_dir, f"{batch_job.job_id}_results.json")
-        
-        # 如果结果文件不存在，则生成结果文件
-        if not os.path.exists(result_file_path):
-            # 获取任务日志和错误
-            logs = BatchJobLog.query.filter_by(batch_job_id=batch_job.id)\
-                .order_by(BatchJobLog.timestamp).all()
-                
-            errors = BatchJobError.query.filter_by(batch_job_id=batch_job.id)\
-                .order_by(BatchJobError.timestamp).all()
-                
-            # 生成结果报告
-            results = {
-                'job_id': batch_job.job_id,
-                'name': batch_job.name,
-                'type': batch_job.type.value,
-                'status': batch_job.status.value,
-                'created_at': batch_job.created_at.isoformat() if batch_job.created_at else None,
-                'completed_at': batch_job.completed_at.isoformat() if batch_job.completed_at else None,
-                'records_count': batch_job.records_count,
-                'processed_count': batch_job.processed_count,
-                'error_count': batch_job.error_count,
-                'logs': [log.to_dict() for log in logs],
-                'errors': [error.to_dict() for error in errors]
-            }
-            
-            with open(result_file_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-        
-        # 记录管理操作日志
-        log_admin(
-            message=f'下载批量任务结果: {batch_job.name}',
-            details=json.dumps({
-                'job_id': batch_job.job_id,
-                'name': batch_job.name,
-                'admin_username': current_user.username,
-                'ip_address': request.remote_addr
-            })
-        )
-        
-        return send_file(
-            result_file_path,
-            as_attachment=True,
-            download_name=f"{batch_job.name}_结果报告.json",
-            mimetype='application/json'
-        )
-        
-    except Exception as e:
-        current_app.logger.error(f"下载批量任务结果失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'下载批量任务结果失败: {str(e)}'
-        }), 500
-
-# 批量任务处理函数（后台运行）
-def process_batch_job(batch_job_id):
-    try:
-        batch_job = BatchJob.query.get(batch_job_id)
-        
-        if not batch_job:
-            current_app.logger.error(f"找不到ID为{batch_job_id}的批量任务")
-            return
-            
-        # 添加处理开始日志
-        add_batch_log(
-            batch_job.id, 
-            "批量处理开始", 
-            LogLevel.INFO
-        )
-        
-        # 读取文件内容
-        file_content = None
-        with open(batch_job.file_path, 'r', encoding='utf-8') as f:
-            file_content = f.read()
-            
-        # 解析文件内容
-        data = None
-        try:
-            if batch_job.file_type == 'json':
-                data = json.loads(file_content)
-                add_batch_log(batch_job.id, "JSON文件解析成功", LogLevel.INFO)
-            elif batch_job.file_type == 'csv':
-                import csv
-                import io
-                csv_data = []
-                csv_reader = csv.DictReader(io.StringIO(file_content))
-                for row in csv_reader:
-                    csv_data.append(row)
-                data = csv_data
-                add_batch_log(batch_job.id, f"CSV文件解析成功，共{len(data)}条记录", LogLevel.INFO)
-            elif batch_job.file_type == 'xml':
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(file_content)
-                # 简单处理XML，实际情况可能需要更复杂的逻辑
-                data = []
-                for child in root:
-                    record = {}
-                    for elem in child:
-                        record[elem.tag] = elem.text
-                    data.append(record)
-                add_batch_log(batch_job.id, f"XML文件解析成功，共{len(data)}条记录", LogLevel.INFO)
-        except Exception as e:
-            error_msg = f"文件解析失败: {str(e)}"
-            add_batch_log(batch_job.id, error_msg, LogLevel.ERROR)
-            batch_job.mark_failed()
-            return
-            
-        # 如果没有数据，则标记为失败
-        if not data or (isinstance(data, list) and len(data) == 0):
-            add_batch_log(batch_job.id, "文件不包含有效数据", LogLevel.ERROR)
-            batch_job.mark_failed()
-            return
-            
-        # 更新记录总数
-        total_records = len(data) if isinstance(data, list) else 1
-        batch_job.records_count = total_records
-        db.session.commit()
-        
-        # 验证数据
-        add_batch_log(batch_job.id, "开始验证数据", LogLevel.INFO)
-        
-        # 按照任务类型处理不同的数据逻辑
-        processed_count = 0
-        error_count = 0
-        
-        # 仅验证模式
-        validate_only = batch_job.options.get('validateOnly', False)
-        skip_duplicates = batch_job.options.get('skipDuplicates', True)
-        
-        # 根据不同的批量类型执行不同的处理逻辑
-        if batch_job.type == BatchType.PATIENT:
-            # 患者记录处理逻辑
-            add_batch_log(batch_job.id, "处理患者记录", LogLevel.INFO)
-            
-            # 处理每条记录
-            for i, record in enumerate(data):
-                try:
-                    # 检查必填字段
-                    required_fields = ['name', 'gender', 'dob']
-                    missing_fields = [f for f in required_fields if f not in record or not record[f]]
-                    
-                    if missing_fields:
-                        error_msg = f"记录缺少必填字段: {', '.join(missing_fields)}"
-                        add_batch_error(batch_job.id, error_msg, i+1, None, None)
-                        error_count += 1
-                        continue
-                        
-                    # 检查日期格式
-                    try:
-                        if 'dob' in record:
-                            datetime.strptime(record['dob'], '%Y-%m-%d')
-                    except ValueError:
-                        error_msg = "出生日期格式错误，应为YYYY-MM-DD"
-                        add_batch_error(batch_job.id, error_msg, i+1, 'dob', record.get('dob'))
-                        error_count += 1
-                        continue
-                        
-                    # 检查性别值
-                    if 'gender' in record and record['gender'] not in ['male', 'female', 'other']:
-                        error_msg = "性别值无效，应为male、female或other"
-                        add_batch_error(batch_job.id, error_msg, i+1, 'gender', record.get('gender'))
-                        error_count += 1
-                        continue
-                        
-                    # 如果不是仅验证模式，则执行实际导入逻辑
-                    if not validate_only:
-                        # 实际导入逻辑，此处为示例
-                        # 检查重复
-                        if skip_duplicates:
-                            # 检查是否已存在相同患者
-                            pass
-                            
-                        # 导入患者记录
-                        pass
-                        
-                    processed_count += 1
-                    
-                    # 更新进度
-                    progress = int((processed_count / total_records) * 100)
-                    batch_job.update_progress(progress, processed_count, error_count)
-                    
-                    # 每处理100条记录记录一次日志
-                    if processed_count % 100 == 0:
-                        add_batch_log(
-                            batch_job.id, 
-                            f"已处理{processed_count}/{total_records}条记录，错误{error_count}条", 
-                            LogLevel.INFO
-                        )
-                        
-                except Exception as e:
-                    error_msg = f"处理记录失败: {str(e)}"
-                    add_batch_error(batch_job.id, error_msg, i+1, None, None)
-                    error_count += 1
-                    
-        elif batch_job.type == BatchType.MEDICATION:
-            # 药物数据处理逻辑
-            add_batch_log(batch_job.id, "处理药物数据", LogLevel.INFO)
-            # 药物数据处理逻辑，与上面类似
-            
-        elif batch_job.type == BatchType.LAB:
-            # 实验室结果处理逻辑
-            add_batch_log(batch_job.id, "处理实验室结果", LogLevel.INFO)
-            # 实验室结果处理逻辑，与上面类似
-            
-        elif batch_job.type == BatchType.CUSTOM:
-            # 自定义数据处理逻辑
-            add_batch_log(batch_job.id, "处理自定义数据", LogLevel.INFO)
-            # 自定义数据处理逻辑，与上面类似
-        
-        # 更新最终进度
-        final_status = BatchStatus.COMPLETED if error_count == 0 else BatchStatus.FAILED
-        final_message = "批量处理完成"
-        final_level = LogLevel.SUCCESS if error_count == 0 else LogLevel.WARNING
-        
-        if validate_only:
-            final_message = f"验证完成，共{total_records}条记录，有效{processed_count}条，错误{error_count}条"
-        else:
-            final_message = f"批量处理完成，共{total_records}条记录，成功导入{processed_count}条，错误{error_count}条"
-            
-        add_batch_log(batch_job.id, final_message, final_level)
-        
-        # 更新任务状态
-        batch_job.status = final_status
-        batch_job.progress = 100
-        batch_job.processed_count = processed_count
-        batch_job.error_count = error_count
-        batch_job.completed_at = datetime.utcnow()
-        db.session.commit()
-        
-    except Exception as e:
-        current_app.logger.error(f"批量任务处理失败: {str(e)}")
-        
-        # 添加错误日志
-        try:
-            add_batch_log(
-                batch_job_id, 
-                f"批量处理失败: {str(e)}", 
-                LogLevel.ERROR
-            )
-            
-            # 标记任务为失败
-            batch_job = BatchJob.query.get(batch_job_id)
-            if batch_job:
-                batch_job.mark_failed()
-        except:
-            pass
-
+    
 # 添加这些路由到合适的位置
 @admin_bp.route('/institutions', methods=['GET'])
 @api_login_required
@@ -2376,3 +2251,123 @@ def delete_record_type(type_id):
         db.session.rollback()
         current_app.logger.error(f"删除记录类型出错: {str(e)}")
         return jsonify({'success': False, 'message': '删除记录类型失败'}), 500
+
+# 获取支持的导出类型和格式
+@admin_bp.route('/export/options', methods=['GET'])
+@api_login_required
+@role_required(Role.ADMIN)
+def get_export_options():
+    try:
+        # 定义系统支持的导出类型
+        export_types = [
+            {
+                'value': 'users',
+                'label': '用户数据',
+                'description': '导出系统中的所有用户信息',
+                'formats': ['json', 'csv', 'excel'],
+                'icon': 'user'
+            },
+            {
+                'value': 'health_records',
+                'label': '健康记录',
+                'description': '导出患者健康记录数据',
+                'formats': ['json', 'csv', 'excel'],
+                'icon': 'file-text'
+            },
+            {
+                'value': 'system_logs',
+                'label': '系统日志',
+                'description': '导出系统操作日志',
+                'formats': ['json', 'csv'],
+                'icon': 'history'
+            },
+            {
+                'value': 'medications',
+                'label': '药物数据',
+                'description': '导出药物处方与用药记录',
+                'formats': ['json', 'csv', 'excel'],
+                'icon': 'medicine-box'
+            },
+            {
+                'value': 'vitals',
+                'label': '生命体征',
+                'description': '导出生命体征数据',
+                'formats': ['json', 'csv', 'excel'],
+                'icon': 'experiment'
+            },
+            {
+                'value': 'labs',
+                'label': '实验室项目',
+                'description': '导出实验室项目数据',
+                'formats': ['json', 'csv', 'excel'],
+                'icon': 'experiment'
+            }
+        ]
+        
+        # 支持的导出格式
+        export_formats = [
+            {
+                'value': 'json',
+                'label': 'JSON',
+                'description': 'JSON格式，适合进一步处理和分析',
+                'mime_type': 'application/json',
+                'icon': 'code'
+            },
+            {
+                'value': 'csv',
+                'label': 'CSV',
+                'description': 'CSV格式，可在Excel等电子表格软件中打开',
+                'mime_type': 'text/csv',
+                'icon': 'file-text'
+            },
+            {
+                'value': 'excel',
+                'label': 'Excel',
+                'description': 'Excel格式，直接以电子表格形式打开',
+                'mime_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'icon': 'file-excel'
+            },
+            {
+                'value': 'xml',
+                'label': 'XML',
+                'description': 'XML格式，结构化数据格式',
+                'mime_type': 'application/xml',
+                'icon': 'code'
+            }
+        ]
+        
+        # 支持的选项
+        export_options = [
+            {
+                'value': 'anonymize',
+                'label': '匿名化数据',
+                'description': '移除或模糊化个人敏感信息'
+            }
+        ]
+        
+        # 获取最近使用的导出类型
+        recent_types = (ExportTask.query
+            .with_entities(ExportTask.export_type, func.count(ExportTask.id).label('count'))
+            .filter(ExportTask.user_id == current_user.id)
+            .group_by(ExportTask.export_type)
+            .order_by(desc('count'))
+            .limit(3)
+            .all())
+            
+        recent_export_types = [t[0] for t in recent_types]
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'exportTypes': export_types,
+                'exportFormats': export_formats,
+                'exportOptions': export_options,
+                'recentTypes': recent_export_types
+            }
+        })
+    except Exception as e:
+        current_app.logger.error(f"获取导出选项失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取导出选项失败: {str(e)}'
+        }), 500

@@ -19,9 +19,9 @@ from .notification import Notification, NotificationType
 from .system_settings import SystemSetting
 from .log import SystemLog, LogType
 from .cache_item import CacheItem
-from .batch_jobs import BatchJob, BatchJobLog, BatchJobError
 from .prescription import Prescription, PrescriptionStatus, PrescriptionItem
 from .researcher import ResearchProject, ProjectTeamMember, ProjectStatus
+from .export import ExportTask, ExportStatus
 
 @login_manager.user_loader
 def load_user(user_id):
