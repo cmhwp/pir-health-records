@@ -26,7 +26,7 @@ def create_app(config_name="development"):
     # 注册销毁函数
     app.teardown_appcontext(close_redis)
     
-    # 创建SQLAlchemy数据库表
+    # 创建SQLAlchemy数据库表(orm)
     with app.app_context():
         db.create_all()
         
@@ -40,7 +40,6 @@ def create_app(config_name="development"):
         init_record_types(app)
     
     # 注册蓝图
-    from .routers.main import main_bp
     from .routers.auth import auth_bp
     from .routers.admin import admin_bp
     from .routers.health_records import health_bp
@@ -49,7 +48,6 @@ def create_app(config_name="development"):
     from .routers.patient import patient_bp
     from .routers.researcher import researcher_bp
     
-    app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(health_bp)

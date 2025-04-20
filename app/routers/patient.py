@@ -777,7 +777,7 @@ def get_record_type(type_id):
             'message': f'获取记录类型详情失败: {str(e)}'
         }), 500
 
-# 获取系统通用代码列表
+# 获取系统通用代码列表(未使用)
 @patient_bp.route('/system-codes', methods=['GET'])
 @login_required
 def get_system_codes():

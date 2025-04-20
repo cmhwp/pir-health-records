@@ -78,9 +78,13 @@ class SystemLog(db.Model):
     """系统日志模型 (SQL版本)"""
     __tablename__ = 'system_logs'
     
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
+    # 日志类型
     log_type = db.Column(db.Enum(LogType), nullable=False, index=True)
+    # 消息
     message = db.Column(db.String(255), nullable=False)
+    # 详情
     details = db.Column(db.Text)
     
     # 关联用户(可选)

@@ -231,10 +231,14 @@ class RecordFile(db.Model):
     """记录相关文件 (SQL数据库)"""
     __tablename__ = 'record_files'
     
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
+    # 记录ID
     record_id = db.Column(db.Integer, db.ForeignKey('health_records.id'), nullable=False)
-    file_name = db.Column(db.String(255), nullable=False)  # 文件名
-    file_path = db.Column(db.String(255), nullable=False)  # 文件路径
+    # 文件名
+    file_name = db.Column(db.String(255), nullable=False)
+    # 文件路径
+    file_path = db.Column(db.String(255), nullable=False)
     file_type = db.Column(db.String(50), nullable=False)  # 文件类型
     file_size = db.Column(db.Integer, nullable=False)  # 文件大小（字节）
     description = db.Column(db.String(255), nullable=True)  # 文件描述
@@ -259,9 +263,12 @@ class MedicationRecord(db.Model):
     """用药记录，与健康记录关联 (SQL数据库)"""
     __tablename__ = 'medication_records'
     
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
+    # 记录ID
     record_id = db.Column(db.Integer, db.ForeignKey('health_records.id'), nullable=False)
-    prescription_id = db.Column(db.Integer, db.ForeignKey('prescriptions.id'), nullable=True)  # 关联的处方ID，可为空
+    # 处方ID
+    prescription_id = db.Column(db.Integer, db.ForeignKey('prescriptions.id'), nullable=True)
     medication_name = db.Column(db.String(100), nullable=False)  # 药品名称
     dosage = db.Column(db.String(50), nullable=True)  # 剂量
     frequency = db.Column(db.String(50), nullable=True)  # 频率
@@ -335,9 +342,12 @@ class QueryHistory(db.Model):
     """查询历史，用于匿名查询分析 (SQL数据库)"""
     __tablename__ = 'query_history'
     
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # 查询用户
-    record_id = db.Column(db.Integer, db.ForeignKey('health_records.id'), nullable=True)  # 查询的记录
+    # 查询用户
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # 查询的记录
+    record_id = db.Column(db.Integer, db.ForeignKey('health_records.id'), nullable=True)
     query_type = db.Column(db.String(50), nullable=False)  # 查询类型
     query_params = db.Column(JSON, nullable=True)  # 查询参数
     is_anonymous = db.Column(db.Boolean, default=False)  # 是否匿名查询

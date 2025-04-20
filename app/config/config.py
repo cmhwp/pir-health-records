@@ -12,17 +12,17 @@ class Config:
     # MongoDB配置
     MONGO_URI = os.environ.get('MONGO_URI') or 'mongodb://localhost:27017/pir_health_records'
     
-    # Redis配置
+    # Redis配置(未使用)
     REDIS_URL = os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
     
     # PIR配置
     PIR_ENABLE_OBFUSCATION = True  # 启用查询混淆
     PIR_NOISE_QUERY_COUNT = 3      # 噪声查询数量
     
-    # JWT配置
+    # JWT配置(登录认证)
     JWT_EXPIRATION_DELTA = 24 * 60 * 60  # 24小时
     
-    # 上传文件配置
+    # 上传文件配置(限制上传文件大小)
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
     
     # 默认管理员账户配置

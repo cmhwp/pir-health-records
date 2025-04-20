@@ -915,12 +915,23 @@ def get_doctor_patients():
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
-        # 获取医生处理过的患者列表（从健康记录中获取患者ID）
-        patient_ids = db.session.query(distinct(HealthRecord.patient_id)).filter(
+        # 从健康记录中获取患者ID
+        patient_ids_from_records = db.session.query(distinct(HealthRecord.patient_id)).filter(
             HealthRecord.doctor_id == current_user.id
         ).all()
         
-        patient_ids = [pid[0] for pid in patient_ids]
+        patient_ids_from_records = [pid[0] for pid in patient_ids_from_records]
+        
+        # 从处方中获取患者ID
+        from ..models.prescription import Prescription
+        patient_ids_from_prescriptions = db.session.query(distinct(Prescription.patient_id)).filter(
+            Prescription.doctor_id == current_user.id
+        ).all()
+        
+        patient_ids_from_prescriptions = [pid[0] for pid in patient_ids_from_prescriptions]
+        
+        # 合并两个患者ID列表（去重）
+        patient_ids = list(set(patient_ids_from_records + patient_ids_from_prescriptions))
         
         # 按姓名搜索
         search_term = request.args.get('search', '')
@@ -961,11 +972,31 @@ def get_doctor_patients():
                 doctor_id=current_user.id
             ).count()
             
-            # 获取最近一次记录时间
+            # 获取处方记录数量
+            prescription_count = Prescription.query.filter_by(
+                patient_id=patient.id,
+                doctor_id=current_user.id
+            ).count()
+            
+            # 获取最近一次记录时间（包括健康记录和处方记录）
             latest_record = HealthRecord.query.filter_by(
                 patient_id=patient.id,
                 doctor_id=current_user.id
             ).order_by(HealthRecord.created_at.desc()).first()
+            
+            latest_prescription = Prescription.query.filter_by(
+                patient_id=patient.id,
+                doctor_id=current_user.id
+            ).order_by(Prescription.created_at.desc()).first()
+            
+            # 确定最近的接触时间
+            latest_time = None
+            if latest_record and latest_prescription:
+                latest_time = max(latest_record.created_at, latest_prescription.created_at)
+            elif latest_record:
+                latest_time = latest_record.created_at
+            elif latest_prescription:
+                latest_time = latest_prescription.created_at
             
             patient_info = None
             if hasattr(patient, 'patient_info') and patient.patient_info:
@@ -982,7 +1013,10 @@ def get_doctor_patients():
                 'email': patient.email,
                 'info': patient_info,
                 'record_count': record_count,
-                'latest_visit': latest_record.created_at.isoformat() if latest_record else None
+                'prescription_count': prescription_count,
+                'total_interactions': record_count + prescription_count,
+                'latest_visit': latest_time.isoformat() if latest_time else None,
+                'has_prescriptions': prescription_count > 0
             })
         
         return jsonify({

@@ -269,4 +269,322 @@ python run.py
 
 ### Docker部署
 
-项目支持Docker容器化部署，详细配置请参考项目中的Docker相关文件。 
+项目支持Docker容器化部署，详细配置请参考项目中的Docker相关文件。
+
+## PIR实验API接口
+
+PIR（Private Information Retrieval，隐私信息检索）实验API接口用于研究员进行PIR协议的性能评估和对比实验。
+
+### PIR实验流程
+
+研究员可以通过以下步骤进行PIR实验：
+
+1. 生成模拟健康数据 - 创建测试数据集
+2. 配置PIR协议参数 - 设置不同类型的PIR协议和参数
+3. 执行隐私查询测试 - 运行实验并获取结果
+4. 分析性能指标 - 评估查询时间、通信成本、隐私保护级别等指标
+5. 比较不同协议 - 对比不同PIR协议的性能优劣
+
+### PIR实验API端点
+
+#### 1. 生成模拟健康数据
+- **URL**: `/api/researcher/experiment/generate-mock-data`
+- **方法**: `POST`
+- **权限**: 研究员
+- **参数**:
+  - `count`: 生成的记录数量，默认100，最大1000
+  - `structured`: 是否生成结构化数据，默认true
+  - `record_types`: 记录类型列表，默认使用所有类型
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "成功生成模拟健康数据",
+    "data": {
+      "experiment_id": "实验ID",
+      "data_count": 100,
+      "sample": [...]  // 样例数据
+    }
+  }
+  ```
+
+#### 2. 配置PIR协议参数
+- **URL**: `/api/researcher/experiment/configure-protocol`
+- **方法**: `POST`
+- **权限**: 研究员
+- **参数**:
+  - `experiment_id`: 实验ID
+  - `protocol_type`: 协议类型，可选值为：
+    - `basic`: 基本PIR协议
+    - `homomorphic`: 同态加密PIR
+    - `hybrid`: 混合PIR协议
+    - `onion`: 洋葱路由PIR
+  - `params`: 协议特定参数，可选
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "PIR协议配置成功",
+    "data": {
+      "experiment_id": "实验ID",
+      "protocol_type": "协议类型",
+      "protocol_config": {...}  // 协议配置
+    }
+  }
+  ```
+
+#### 3. 执行隐私查询测试
+- **URL**: `/api/researcher/experiment/execute-query`
+- **方法**: `POST`
+- **权限**: 研究员
+- **参数**:
+  - `experiment_id`: 实验ID
+  - `query_count`: 执行查询的次数，默认10，最大50
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "PIR查询实验执行成功",
+    "data": {
+      "experiment_id": "实验ID",
+      "query_count": 10,
+      "results": {
+        "results": [...],  // 查询结果
+        "metrics": {...},  // 性能指标
+        "protocol": {...}  // 使用的协议
+      }
+    }
+  }
+  ```
+
+#### 4. 获取性能指标
+- **URL**: `/api/researcher/experiment/performance-metrics`
+- **方法**: `GET`
+- **权限**: 研究员
+- **参数**:
+  - `experiment_id`: 实验ID
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "获取性能指标成功",
+    "data": {
+      "experiment_id": "实验ID",
+      "protocol": {...},  // 协议配置
+      "metrics": {
+        "query_time": 0.123,  // 查询时间
+        "accuracy": 1.0,      // 准确率
+        "comm_cost": 1024,    // 通信成本
+        "server_load": 0.5,   // 服务器负载
+        "client_load": 0.2,   // 客户端负载
+        "privacy_level": 8    // 隐私保护级别
+      },
+      "timestamp": "2023-01-01T00:00:00"
+    }
+  }
+  ```
+
+#### 5. 比较多个协议性能
+- **URL**: `/api/researcher/experiment/compare-protocols`
+- **方法**: `POST`
+- **权限**: 研究员
+- **参数**:
+  - `experiment_ids`: 要比较的实验ID列表，至少需要两个
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "PIR协议性能比较成功",
+    "data": {
+      "protocols": [
+        {
+          "experiment_id": "实验1ID",
+          "protocol_type": "basic",
+          "metrics": {...}
+        },
+        {
+          "experiment_id": "实验2ID",
+          "protocol_type": "homomorphic",
+          "metrics": {...}
+        }
+      ],
+      "comparisons": [
+        {
+          "baseline": {"experiment_id": "实验1ID", "protocol_type": "basic"},
+          "current": {"experiment_id": "实验2ID", "protocol_type": "homomorphic"},
+          "report": {
+            "summary": {...},
+            "comparisons": {...},
+            "recommendations": [...]
+          }
+        }
+      ]
+    }
+  }
+  ```
+
+#### 6. 获取实验列表
+- **URL**: `/api/researcher/experiments`
+- **方法**: `GET`
+- **权限**: 研究员
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "获取实验列表成功",
+    "data": {
+      "experiments": [
+        {
+          "id": "实验ID",
+          "experiment_type": "mock_data_generation",
+          "created_at": "2023-01-01T00:00:00",
+          "updated_at": "2023-01-01T00:00:00",
+          "data_count": 100,
+          "protocol_type": "basic",
+          "has_results": true,
+          "query_time": "2023-01-01T00:00:00",
+          "metrics_summary": {
+            "query_time": 0.123,
+            "privacy_level": 3
+          }
+        },
+        ...
+      ]
+    }
+  }
+  ```
+
+#### 7. 获取实验详情
+- **URL**: `/api/researcher/experiments/{experiment_id}`
+- **方法**: `GET`
+- **权限**: 研究员
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "获取实验详情成功",
+    "data": {
+      "id": "实验ID",
+      "experiment_type": "mock_data_generation",
+      "created_at": "2023-01-01T00:00:00",
+      "updated_at": "2023-01-01T00:00:00",
+      "parameters": {...},
+      "data_count": 100,
+      "protocol_config": {...},
+      "query_time": "2023-01-01T00:00:00",
+      "results": {
+        "metrics": {...},
+        "sample_results": [...]
+      },
+      "data_samples": [...]
+    }
+  }
+  ```
+
+#### 8. 删除实验
+- **URL**: `/api/researcher/experiments/{experiment_id}`
+- **方法**: `DELETE`
+- **权限**: 研究员
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "删除实验成功",
+    "data": {
+      "experiment_id": "实验ID"
+    }
+  }
+  ```
+
+### PIR协议类型
+
+本系统支持以下PIR协议类型：
+
+1. **基本PIR协议 (Basic)** - 简单直接的PIR实现，适合教学和基准测试
+2. **同态加密PIR (Homomorphic)** - 使用同态加密技术的PIR，提供高强度安全性
+3. **混合PIR协议 (Hybrid)** - 结合多种技术的综合协议，平衡性能和安全性
+4. **洋葱路由PIR (Onion)** - 基于洋葱路由的多层加密PIR，提供最高隐私保护
+
+### 性能指标说明
+
+实验结果包含以下性能指标：
+
+1. **查询时间 (query_time)** - 执行查询所需的时间（秒）
+2. **准确率 (accuracy)** - 查询结果的准确性（0-1）
+3. **通信成本 (comm_cost)** - 查询产生的网络通信量（字节）
+4. **服务器负载 (server_load)** - 服务器端计算负担
+5. **客户端负载 (client_load)** - 客户端计算负担
+6. **隐私保护级别 (privacy_level)** - 协议提供的隐私保护强度（1-10）
+
+### 实验建议
+
+- 针对不同规模的数据集测试PIR协议性能
+- 比较不同协议在查询时间和通信量之间的权衡
+- 评估各协议在不同网络环境下的表现
+- 根据具体应用场景，选择合适的PIR协议参数
+
+## PIR实验实现详情
+
+PIR实验功能的实现通过以下主要组件完成：
+
+### 1. 核心功能类和工具函数
+
+- **PIRProtocolType** - 定义支持的PIR协议类型（基本、同态加密、混合等）
+- **PIRPerformanceMetric** - 定义评估PIR性能的关键指标
+- **generate_mock_health_data()** - 生成结构化/非结构化模拟健康数据
+- **configure_pir_protocol()** - 配置不同类型的PIR协议参数
+- **execute_pir_query_experiment()** - 执行PIR查询实验并收集性能指标
+- **analyze_experiment_results()** - 分析实验结果并提供优化建议
+
+### 2. API端点
+
+为研究员提供8个专用API端点，覆盖实验全流程：
+1. 生成模拟数据
+2. 配置协议参数
+3. 执行查询测试
+4. 收集性能指标
+5. 比较协议性能
+6. 管理实验记录
+
+### 3. 数据存储
+
+- 实验元数据和结果存储在MongoDB的`pir_experiments`集合中
+- 每个实验的模拟数据存储在单独的集合中，命名格式为`experiment_data_{实验ID}`
+- 性能指标以结构化格式存储，便于可视化和比较分析
+
+### 4. 性能评估
+
+系统评估6个关键性能指标：
+- 查询时间
+- 准确率
+- 通信成本
+- 服务器负载
+- 客户端负载
+- 隐私保护级别
+
+这些指标全面反映了PIR协议的效率和安全性权衡。
+
+### 5. 协议实现
+
+目前支持的PIR协议包括：
+- **基本PIR** - 简单直接的实现，适合作为基准
+- **同态加密PIR** - 提供高安全性，但计算开销较大
+- **混合PIR** - 结合分区技术和加密，平衡效率和隐私
+- **洋葱路由PIR** - 多层加密提供极高隐私保护
+
+### 技术特性
+
+1. **模块化设计** - 便于添加新的PIR协议实现
+2. **可配置参数** - 每种协议提供多个可调整参数
+3. **实时性能监控** - 详细记录每个查询的执行情况
+4. **数据可视化** - 支持将实验结果导出分析
+5. **比较分析** - 自动生成协议性能对比报告
+
+### 使用建议
+
+研究员可以通过以下方式充分利用PIR实验功能：
+
+1. 从小规模数据集开始，逐步增加数据量测试扩展性
+2. 针对每种协议类型，测试不同参数配置的影响
+3. 记录在不同网络条件下的性能差异
+4. 根据具体应用场景的重点（查询速度、隐私强度等）选择最适合的协议 

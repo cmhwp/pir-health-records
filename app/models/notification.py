@@ -7,24 +7,33 @@ class NotificationType(enum.Enum):
     SYSTEM = "system"                      # 系统通知
     RECORD = "record"                      # 健康记录通知
     SHARE = "share"                        # 记录共享通知
-    APPOINTMENT = "appointment"            # 预约通知
     PRESCRIPTION = "prescription"          # 处方通知
     PRESCRIPTION_REQUEST = "prescription_request"  # 处方申请通知
 
 class Notification(db.Model):
     """通知模型"""
     __tablename__ = 'notifications'
-    
+
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # 通知接收者
-    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # 发送者（如果适用）
-    notification_type = db.Column(db.Enum(NotificationType), nullable=False)  # 通知类型
-    title = db.Column(db.String(100), nullable=False)  # 通知标题
-    message = db.Column(db.Text, nullable=False)  # 通知内容
-    related_id = db.Column(db.String(100), nullable=True)  # 相关记录/对象ID
-    is_read = db.Column(db.Boolean, default=False)  # 是否已读
-    created_at = db.Column(db.DateTime, default=datetime.now)  # 创建时间
-    expires_at = db.Column(db.DateTime, nullable=True)  # 过期时间
+    # 通知接收者
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # 发送者（如果适用）
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    # 通知类型
+    notification_type = db.Column(db.Enum(NotificationType), nullable=False)
+    # 通知标题
+    title = db.Column(db.String(100), nullable=False)
+    # 通知内容
+    message = db.Column(db.Text, nullable=False)
+    # 相关记录/对象ID
+    related_id = db.Column(db.String(100), nullable=True)
+    # 是否已读
+    is_read = db.Column(db.Boolean, default=False)
+    # 创建时间
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    # 过期时间
+    expires_at = db.Column(db.DateTime, nullable=True)
     
     def to_dict(self):
         return {

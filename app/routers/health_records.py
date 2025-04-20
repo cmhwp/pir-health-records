@@ -3040,96 +3040,6 @@ def update_pir_settings():
         }), 500 
 
 # =========================== 第一阶段新增功能 ===========================
-
-# 批量上传健康记录
-@health_bp.route('/records/batch-upload', methods=['POST'])
-@login_required
-@role_required(Role.PATIENT)
-def batch_upload_health_records():
-    try:
-        # 获取批量上传的记录数据
-        records_data = request.json.get('records', [])
-        
-        if not records_data or not isinstance(records_data, list):
-            return jsonify({
-                'success': False,
-                'message': '缺少批量记录数据或格式不正确'
-            }), 400
-            
-        if len(records_data) > 100:  # 限制单次批量上传数量
-            return jsonify({
-                'success': False,
-                'message': '单次批量上传不能超过100条记录'
-            }), 400
-            
-        # 处理每条记录
-        uploaded_records = []
-        for record_data in records_data:
-            # 基本验证
-            if not record_data.get('title') or not record_data.get('record_type'):
-                continue
-                
-            # 确保记录属于当前用户
-            record_data['patient_id'] = current_user.id
-            
-            # 处理时间字段
-            if 'record_date' in record_data and record_data['record_date']:
-                try:
-                    record_data['record_date'] = datetime.fromisoformat(record_data['record_date'])
-                except ValueError:
-                    record_data['record_date'] = datetime.now()
-            else:
-                record_data['record_date'] = datetime.now()
-                
-            # 添加创建和更新时间
-            record_data['created_at'] = datetime.now()
-            record_data['updated_at'] = datetime.now()
-            
-            # 生成版本信息
-            record_data['version'] = 1
-            record_data['version_history'] = [{
-                'version': 1,
-                'created_at': datetime.now(),
-                'created_by': current_user.id,
-                'description': '初始版本'
-            }]
-            
-            # 存储到MongoDB
-            mongo_id = store_health_record_mongodb(record_data, current_user.id, [])
-            
-            # 添加到已上传列表
-            uploaded_records.append({
-                'record_id': str(mongo_id),
-                'title': record_data['title'],
-                'record_type': record_data['record_type']
-            })
-            
-        # 记录批量上传操作
-        mongo.db.query_history.insert_one({
-            'user_id': current_user.id,
-            'query_type': 'batch_upload',
-            'is_anonymous': False,
-            'query_params': {'record_count': len(uploaded_records)},
-            'query_time': datetime.now()
-        })
-        
-        return jsonify({
-            'success': True,
-            'message': f'成功批量上传 {len(uploaded_records)} 条健康记录',
-            'data': {
-                'uploaded_records': uploaded_records,
-                'total_uploaded': len(uploaded_records),
-                'total_requested': len(records_data)
-            }
-        }), 201
-        
-    except Exception as e:
-        current_app.logger.error(f"批量上传健康记录失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'批量上传健康记录失败: {str(e)}'
-        }), 500
-
 # 获取健康记录版本历史
 @health_bp.route('/records/<record_id>/versions', methods=['GET'])
 @login_required
@@ -4509,7 +4419,7 @@ def generate_import_template():
                 ['   - LAB_RESULT: 实验室结果'],
                 ['   - MEDICATION: 药物治疗'],
                 ['   - SURGERY: 手术'],
-                ['   - VITAL_SIGNS: 生命体征'],
+                ['   - VITAL_SIGN: 生命体征'],
                 ['   - VACCINATION: 疫苗接种'],
                 ['   - ALLERGY: 过敏记录'],
                 ['   - DIAGNOSIS: 诊断结果'],

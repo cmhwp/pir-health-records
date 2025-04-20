@@ -6,10 +6,15 @@ class SystemSetting(db.Model):
     """系统设置模型"""
     __tablename__ = 'system_settings'
     
+    # 主键
     id = db.Column(db.Integer, primary_key=True)
+    # 键
     key = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    # 值
     value = db.Column(db.Text, nullable=False)
+    # 值类型
     value_type = db.Column(db.String(20), nullable=False, default='string')
+    # 描述
     description = db.Column(db.String(255))
     
     # 权限控制

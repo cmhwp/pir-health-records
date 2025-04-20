@@ -41,7 +41,8 @@ class User(db.Model, UserMixin):
     @property
     def password(self):
         raise AttributeError('密码不是可读属性')
-        
+    
+    # 设置密码
     @password.setter
     def password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -59,6 +60,7 @@ class User(db.Model, UserMixin):
         self.last_login_at = datetime.now()
         db.session.commit()
     
+    # 转换为字典
     def to_dict(self):
         data = {
             'id': self.id,

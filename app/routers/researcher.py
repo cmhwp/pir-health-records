@@ -21,6 +21,14 @@ from ..routers.auth import role_required
 from ..utils.mongo_utils import mongo, get_mongo_db
 from ..utils.log_utils import log_record, log_research, log_pir
 from ..utils.pir_utils import PIRQuery, prepare_pir_database, parse_encrypted_query_id, find_similar_records
+from ..utils.experiment_utils import (
+    PIRProtocolType, 
+    PIRPerformanceMetric, 
+    generate_mock_health_data, 
+    configure_pir_protocol,
+    execute_pir_query_experiment,
+    analyze_experiment_results
+)
 
 # 创建研究人员路由蓝图
 researcher_bp = Blueprint('researcher', __name__, url_prefix='/api/researcher')
@@ -2432,4 +2440,632 @@ def get_pir_decrypt_key(record_id):
         return jsonify({
             'success': False,
             'message': f'获取解密密钥失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：生成模拟健康数据
+@researcher_bp.route('/experiment/generate-mock-data', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def generate_mock_data():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        count = data.get('count', 100)
+        structured = data.get('structured', True)
+        record_types = data.get('record_types')
+        
+        # 验证参数
+        if count > 1000:
+            return jsonify({
+                'success': False,
+                'message': '生成数据量过大，请将数量控制在1000条以内'
+            }), 400
+            
+        # 生成模拟数据
+        mock_data = generate_mock_health_data(
+            count=count, 
+            structured=structured,
+            record_types=record_types
+        )
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}生成了{count}条模拟健康数据",
+            details={
+                'researcher_id': current_user.id,
+                'data_count': count,
+                'structured': structured,
+                'record_types': record_types
+            }
+        )
+        
+        # 将生成的数据存储到MongoDB临时集合中
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 创建实验记录
+        experiment_id = str(ObjectId())
+        
+        # 记录实验元数据
+        experiment_meta = {
+            '_id': ObjectId(experiment_id),
+            'researcher_id': current_user.id,
+            'researcher_name': current_user.full_name,
+            'experiment_type': 'mock_data_generation',
+            'created_at': datetime.now(),
+            'parameters': {
+                'count': count,
+                'structured': structured,
+                'record_types': record_types
+            },
+            'data_count': len(mock_data)
+        }
+        
+        # 存储元数据和模拟数据
+        experiment_collection.insert_one(experiment_meta)
+        
+        # 为模拟数据创建单独的集合
+        data_collection_name = f'experiment_data_{experiment_id}'
+        mongo_db[data_collection_name].insert_many(mock_data)
+        
+        # 更新实验元数据，添加数据集合名称
+        experiment_collection.update_one(
+            {'_id': ObjectId(experiment_id)},
+            {'$set': {'data_collection': data_collection_name}}
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '成功生成模拟健康数据',
+            'data': {
+                'experiment_id': experiment_id,
+                'data_count': len(mock_data),
+                'sample': mock_data[:3] if len(mock_data) > 0 else []  # 返回3条样例数据
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"生成模拟健康数据失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'生成模拟健康数据失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：配置PIR协议参数
+@researcher_bp.route('/experiment/configure-protocol', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def configure_protocol():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        protocol_type = data.get('protocol_type', PIRProtocolType.BASIC)
+        custom_params = data.get('params', {})
+        experiment_id = data.get('experiment_id')
+        
+        # 验证实验ID
+        if not experiment_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少实验ID参数'
+            }), 400
+            
+        # 验证协议类型
+        valid_protocols = [
+            PIRProtocolType.BASIC,
+            PIRProtocolType.HOMOMORPHIC, 
+            PIRProtocolType.HYBRID,
+            PIRProtocolType.ONION
+        ]
+        
+        if protocol_type not in valid_protocols:
+            return jsonify({
+                'success': False,
+                'message': f'无效的协议类型: {protocol_type}'
+            }), 400
+            
+        # 配置协议参数
+        protocol_config = configure_pir_protocol(protocol_type, custom_params)
+        
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查找实验记录
+        experiment = experiment_collection.find_one({'_id': ObjectId(experiment_id)})
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 更新实验记录，添加协议配置
+        experiment_collection.update_one(
+            {'_id': ObjectId(experiment_id)},
+            {'$set': {
+                'protocol_config': protocol_config,
+                'updated_at': datetime.now()
+            }}
+        )
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}配置了PIR实验协议",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_id': experiment_id,
+                'protocol_type': protocol_type,
+                'protocol_config': protocol_config
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'PIR协议配置成功',
+            'data': {
+                'experiment_id': experiment_id,
+                'protocol_type': protocol_type,
+                'protocol_config': protocol_config
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"配置PIR协议参数失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'配置PIR协议参数失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：执行隐私查询测试
+@researcher_bp.route('/experiment/execute-query', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def execute_query_experiment():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        experiment_id = data.get('experiment_id')
+        query_count = min(data.get('query_count', 10), 50)  # 限制最大查询次数
+        
+        # 验证实验ID
+        if not experiment_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少实验ID参数'
+            }), 400
+            
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查找实验记录
+        experiment = experiment_collection.find_one({'_id': ObjectId(experiment_id)})
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 检查是否已配置协议
+        protocol_config = experiment.get('protocol_config')
+        if not protocol_config:
+            return jsonify({
+                'success': False,
+                'message': '请先配置PIR协议参数'
+            }), 400
+            
+        # 获取实验数据
+        data_collection_name = experiment.get('data_collection')
+        if not data_collection_name:
+            return jsonify({
+                'success': False,
+                'message': '实验数据集不存在'
+            }), 404
+            
+        # 从数据集合获取数据
+        experiment_data = list(mongo_db[data_collection_name].find())
+        if not experiment_data:
+            return jsonify({
+                'success': False,
+                'message': '实验数据集为空'
+            }), 404
+            
+        # 生成随机查询目标索引
+        max_index = len(experiment_data) - 1
+        if max_index < 0:
+            return jsonify({
+                'success': False,
+                'message': '实验数据集为空'
+            }), 404
+            
+        target_indices = random.sample(range(max_index + 1), min(query_count, max_index + 1))
+        
+        # 执行PIR查询实验
+        experiment_results = execute_pir_query_experiment(
+            data=experiment_data,
+            target_indices=target_indices,
+            protocol_config=protocol_config
+        )
+        
+        # 更新实验记录，添加查询结果
+        experiment_collection.update_one(
+            {'_id': ObjectId(experiment_id)},
+            {'$set': {
+                'query_results': experiment_results,
+                'query_time': datetime.now()
+            }}
+        )
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}执行了PIR实验查询",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_id': experiment_id,
+                'query_count': len(target_indices),
+                'protocol_type': protocol_config.get('protocol_type'),
+                'metrics': experiment_results.get('metrics')
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'PIR查询实验执行成功',
+            'data': {
+                'experiment_id': experiment_id,
+                'query_count': len(target_indices),
+                'results': experiment_results
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"执行PIR查询实验失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'执行PIR查询实验失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：获取性能指标
+@researcher_bp.route('/experiment/performance-metrics', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_performance_metrics():
+    try:
+        # 获取请求参数
+        experiment_id = request.args.get('experiment_id')
+        
+        # 验证实验ID
+        if not experiment_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少实验ID参数'
+            }), 400
+            
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查找实验记录
+        experiment = experiment_collection.find_one({'_id': ObjectId(experiment_id)})
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 检查是否已执行查询
+        query_results = experiment.get('query_results')
+        if not query_results:
+            return jsonify({
+                'success': False,
+                'message': '请先执行PIR查询实验'
+            }), 400
+            
+        # 提取性能指标
+        metrics = query_results.get('metrics', {})
+        protocol = query_results.get('protocol', {})
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}查看了PIR实验性能指标",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_id': experiment_id
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '获取性能指标成功',
+            'data': {
+                'experiment_id': experiment_id,
+                'protocol': protocol,
+                'metrics': metrics,
+                'timestamp': experiment.get('query_time')
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取性能指标失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取性能指标失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：比较多个协议性能
+@researcher_bp.route('/experiment/compare-protocols', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def compare_protocols():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        experiment_ids = data.get('experiment_ids', [])
+        
+        if not experiment_ids or len(experiment_ids) < 2:
+            return jsonify({
+                'success': False,
+                'message': '需要至少两个实验ID进行比较'
+            }), 400
+            
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 获取实验记录
+        experiments = []
+        for exp_id in experiment_ids:
+            experiment = experiment_collection.find_one({'_id': ObjectId(exp_id)})
+            if experiment and 'query_results' in experiment:
+                experiments.append(experiment)
+                
+        if len(experiments) < 2:
+            return jsonify({
+                'success': False,
+                'message': '未找到足够的有效实验记录进行比较'
+            }), 404
+            
+        # 准备比较数据
+        comparison_data = []
+        for exp in experiments:
+            protocol_config = exp.get('protocol_config', {})
+            query_results = exp.get('query_results', {})
+            metrics = query_results.get('metrics', {})
+            
+            comparison_data.append({
+                'experiment_id': str(exp['_id']),
+                'protocol_type': protocol_config.get('protocol_type', 'unknown'),
+                'metrics': metrics,
+                'timestamp': exp.get('query_time')
+            })
+            
+        # 进行分析比较
+        comparisons = []
+        baseline = comparison_data[0]  # 使用第一个实验作为基准
+        
+        for i in range(1, len(comparison_data)):
+            current = comparison_data[i]
+            
+            # 分析当前实验与基准实验的比较
+            comparison_report = analyze_experiment_results(
+                experiment_results={'metrics': current['metrics'], 'protocol': {'protocol_type': current['protocol_type']}},
+                baseline_results={'metrics': baseline['metrics'], 'protocol': {'protocol_type': baseline['protocol_type']}}
+            )
+            
+            comparisons.append({
+                'baseline': {
+                    'experiment_id': baseline['experiment_id'],
+                    'protocol_type': baseline['protocol_type']
+                },
+                'current': {
+                    'experiment_id': current['experiment_id'],
+                    'protocol_type': current['protocol_type']
+                },
+                'report': comparison_report
+            })
+            
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}比较了{len(experiments)}个PIR协议的性能",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_ids': experiment_ids
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'PIR协议性能比较成功',
+            'data': {
+                'protocols': comparison_data,
+                'comparisons': comparisons
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"比较协议性能失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'比较协议性能失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：获取实验列表
+@researcher_bp.route('/experiments', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_experiments():
+    try:
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查询当前研究员的实验记录
+        experiments = list(experiment_collection.find(
+            {'researcher_id': current_user.id}
+        ).sort('created_at', -1))
+        
+        # 格式化实验记录
+        formatted_experiments = []
+        for exp in experiments:
+            protocol_config = exp.get('protocol_config', {})
+            query_results = exp.get('query_results', {})
+            
+            formatted_exp = {
+                'id': str(exp['_id']),
+                'experiment_type': exp.get('experiment_type'),
+                'created_at': exp.get('created_at').isoformat() if exp.get('created_at') else None,
+                'updated_at': exp.get('updated_at').isoformat() if exp.get('updated_at') else None,
+                'data_count': exp.get('data_count', 0),
+                'protocol_type': protocol_config.get('protocol_type') if protocol_config else None,
+                'has_results': 'query_results' in exp,
+                'query_time': exp.get('query_time').isoformat() if exp.get('query_time') else None
+            }
+            
+            # 如果有查询结果，添加简要的性能指标
+            if 'query_results' in exp and 'metrics' in query_results:
+                metrics = query_results['metrics']
+                formatted_exp['metrics_summary'] = {
+                    'query_time': metrics.get(PIRPerformanceMetric.QUERY_TIME),
+                    'privacy_level': metrics.get(PIRPerformanceMetric.PRIVACY_LEVEL)
+                }
+                
+            formatted_experiments.append(formatted_exp)
+        
+        return jsonify({
+            'success': True,
+            'message': '获取实验列表成功',
+            'data': {
+                'experiments': formatted_experiments
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取实验列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取实验列表失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：获取实验详情
+@researcher_bp.route('/experiments/<experiment_id>', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_experiment_details(experiment_id):
+    try:
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查询实验记录
+        experiment = experiment_collection.find_one({
+            '_id': ObjectId(experiment_id),
+            'researcher_id': current_user.id
+        })
+        
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 格式化实验详情
+        formatted_experiment = {
+            'id': str(experiment['_id']),
+            'experiment_type': experiment.get('experiment_type'),
+            'created_at': experiment.get('created_at').isoformat() if experiment.get('created_at') else None,
+            'updated_at': experiment.get('updated_at').isoformat() if experiment.get('updated_at') else None,
+            'parameters': experiment.get('parameters', {}),
+            'data_count': experiment.get('data_count', 0),
+            'protocol_config': experiment.get('protocol_config'),
+            'query_time': experiment.get('query_time').isoformat() if experiment.get('query_time') else None
+        }
+        
+        # 获取查询结果
+        if 'query_results' in experiment:
+            query_results = experiment['query_results']
+            formatted_experiment['results'] = {
+                'metrics': query_results.get('metrics', {}),
+                'sample_results': query_results.get('results', [])[:5]  # 仅返回前5个结果样例
+            }
+            
+        # 获取数据样例
+        if 'data_collection' in experiment:
+            data_collection = mongo_db[experiment['data_collection']]
+            data_samples = list(data_collection.find().limit(3))
+            
+            # 格式化样例数据
+            formatted_samples = []
+            for sample in data_samples:
+                sample['_id'] = str(sample['_id'])
+                formatted_samples.append(sample)
+                
+            formatted_experiment['data_samples'] = formatted_samples
+            
+        return jsonify({
+            'success': True,
+            'message': '获取实验详情成功',
+            'data': formatted_experiment
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取实验详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取实验详情失败: {str(e)}'
+        }), 500
+
+# 研究人员PIR实验：删除实验
+@researcher_bp.route('/experiments/<experiment_id>', methods=['DELETE'])
+@login_required
+@role_required(Role.RESEARCHER)
+def delete_experiment(experiment_id):
+    try:
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查询实验记录
+        experiment = experiment_collection.find_one({
+            '_id': ObjectId(experiment_id),
+            'researcher_id': current_user.id
+        })
+        
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 删除关联的数据集合
+        if 'data_collection' in experiment:
+            try:
+                mongo_db[experiment['data_collection']].drop()
+            except Exception as e:
+                current_app.logger.error(f"删除实验数据集合失败: {str(e)}")
+                
+        # 删除实验记录
+        experiment_collection.delete_one({'_id': ObjectId(experiment_id)})
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}删除了PIR实验",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_id': experiment_id
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '删除实验成功',
+            'data': {
+                'experiment_id': experiment_id
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"删除实验失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'删除实验失败: {str(e)}'
         }), 500
