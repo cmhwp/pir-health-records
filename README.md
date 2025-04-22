@@ -2,6 +2,14 @@
 
 本项目是一个基于Private Information Retrieval (PIR)技术的电子健康记录隐私保护查询系统，采用Flask构建，支持基于角色的访问控制(RBAC)，确保医疗数据在分析和共享过程中的隐私和安全。
 
+## 最新更新
+
+- **多线程数据加密**: 使用ThreadPoolExecutor并行处理加密操作，显著提升大批量数据生成性能
+- **优化批量数据处理**: 实现批量数据插入，避免大量数据一次性处理导致的内存问题
+- **加强ObjectId序列化**: 改进JSON序列化机制，确保MongoDB ObjectId的正确处理
+- **简化日期处理逻辑**: 优化API端点中的日期格式处理，提高系统稳定性
+- **增强数据完整性验证**: 使用自定义DateTimeEncoder确保记录完整性哈希正确计算
+
 ## 项目特色
 
 - **隐私保护查询技术**: 基于PIR(Private Information Retrieval)实现的隐匿查询机制，用户可查询自己的健康记录而不泄露查询意图
@@ -13,6 +21,7 @@
 - **文件上传管理**: 支持各类医疗文件的上传和管理
 - **数据导入导出**: 支持健康记录的JSON/CSV格式导入导出
 - **实时通知系统**: 记录共享和访问的实时通知机制
+- **多线程数据处理**: 利用多线程并行处理提高数据加密和批量操作性能
 
 ## 项目架构
 
@@ -292,9 +301,13 @@ PIR（Private Information Retrieval，隐私信息检索）实验API接口用于
 - **方法**: `POST`
 - **权限**: 研究员
 - **参数**:
-  - `count`: 生成的记录数量，默认100，最大1000
+  - `count`: 生成的记录数量，默认100，最大100000
   - `structured`: 是否生成结构化数据，默认true
   - `record_types`: 记录类型列表，默认使用所有类型
+- **功能说明**:
+  - 生成的记录中，如果`is_encrypted`标记为`true`，系统会自动对记录进行加密处理
+  - 同时保存明文版本和加密版本，便于研究比较
+  - 加密使用AES-GCM-256算法，并添加完整性哈希
 - **响应**:
   ```json
   {
@@ -303,7 +316,41 @@ PIR（Private Information Retrieval，隐私信息检索）实验API接口用于
     "data": {
       "experiment_id": "实验ID",
       "data_count": 100,
-      "sample": [...]  // 样例数据
+      "sample": {
+        "encrypted": [
+          {
+            "_id": "645fdb2a7e5d0abcde123456",
+            "patient_id": 1025,
+            "doctor_id": 2015,
+            "record_type": "DIAGNOSIS",
+            "is_encrypted": true,
+            "encrypted_data": {
+              "ciphertext": "加密后的数据",
+              "iv": "初始化向量",
+              "tag": "认证标签",
+              "aad": "附加认证数据"
+            },
+            "key_salt": "密钥盐值",
+            "encryption_algorithm": "AES-GCM-256",
+            "encryption_date": "2023-01-01T00:00:00",
+            "integrity_hash": "数据完整性哈希"
+          }
+        ],
+        "plaintext": [
+          {
+            "_id": "645fdb2a7e5d0abcde123456",
+            "patient_id": 1025,
+            "doctor_id": 2015,
+            "record_type": "DIAGNOSIS",
+            "title": "冠心病检查记录",
+            "description": "患者1025的DIAGNOSIS记录，记录日期为2022-05-01",
+            "diagnosis": "高血压",
+            "severity": "中度",
+            "notes": "患者表现出糖尿病的典型症状",
+            "is_encrypted": true
+          }
+        ]
+      }
     }
   }
   ```
@@ -458,6 +505,12 @@ PIR（Private Information Retrieval，隐私信息检索）实验API接口用于
 - **URL**: `/api/researcher/experiments/{experiment_id}`
 - **方法**: `GET`
 - **权限**: 研究员
+- **功能说明**:
+  - 返回实验的详细信息，包括实验配置、协议参数、结果指标等
+  - 对于包含加密数据的实验，同时返回加密记录和对应的明文记录样例
+  - 提供协议参数详细解释和说明
+  - 返回数据示例进行对比分析
+  - 自动标记需要解密的查询结果，并提供解密API路径
 - **响应**:
   ```json
   {
@@ -468,123 +521,205 @@ PIR（Private Information Retrieval，隐私信息检索）实验API接口用于
       "experiment_type": "mock_data_generation",
       "created_at": "2023-01-01T00:00:00",
       "updated_at": "2023-01-01T00:00:00",
-      "parameters": {...},
+      "parameters": {
+        "count": 100,
+        "structured": true,
+        "record_types": ["DIAGNOSIS", "LAB_RESULT"],
+        "encrypted_count": 50
+      },
       "data_count": 100,
-      "protocol_config": {...},
+      "protocol_config": {
+        "protocol_type": "homomorphic",
+        "encryption_bits": 2048,
+        "query_batching": true
+      },
       "query_time": "2023-01-01T00:00:00",
       "results": {
-        "metrics": {...},
-        "sample_results": [...]
+        "metrics": {
+          "query_time": 0.123,
+          "accuracy": 1.0,
+          "comm_cost": 1024,
+          "server_load": 0.5,
+          "client_load": 0.2,
+          "privacy_level": 8,
+          "total_query_time": 30.5,
+          "start_time": "2023-01-01T00:00:00",
+          "end_time": "2023-01-01T00:00:30"
+        },
+        "sample_results": [
+          {
+            "target_index": 6099,
+            "result": [166, 170, 114, 114, 221, 21, 20, 195],
+            "original_data": {
+              "_id": {"$oid": "68064a3a9e83b0fcc8026c15"},
+              "patient_id": 1048,
+              "is_encrypted": true
+            },
+            "query_time": 0.112,
+            "comm_cost": 38848,
+            "accuracy": 1,
+            "privacy_level": 8,
+            "needs_decrypt": true,
+            "result_index": 0,
+            "decrypt_api": "/api/researcher/experiment/decrypt-result"
+          }
+        ]
       },
-      "data_samples": [...]
+      "data_samples": [
+        {
+          "_id": "645fdb2a7e5d0abcde123456",
+          "patient_id": 1025,
+          "doctor_id": 2015,
+          "record_type": "DIAGNOSIS",
+          "is_encrypted": true,
+          "encrypted_data": {
+            "ciphertext": "加密后的数据",
+            "iv": "初始化向量",
+            "tag": "认证标签",
+            "aad": "附加认证数据"
+          },
+          "key_salt": "密钥盐值",
+          "encryption_algorithm": "AES-GCM-256"
+        },
+        {
+          "_id": "645fdb2a7e5d0abcde123457",
+          "patient_id": 1026,
+          "doctor_id": 2016,
+          "record_type": "LAB_RESULT",
+          "is_encrypted": false,
+          "blood_pressure": "120/80",
+          "heart_rate": 75
+        }
+      ],
+      "plaintext_samples": [
+        {
+          "_id": "645fdb2a7e5d0abcde123456",
+          "patient_id": 1025,
+          "doctor_id": 2015,
+          "record_type": "DIAGNOSIS",
+          "title": "高血压检查记录",
+          "description": "患者1025的DIAGNOSIS记录",
+          "diagnosis": "高血压",
+          "severity": "中度",
+          "notes": "患者表现出高血压的典型症状",
+          "is_encrypted": true
+        }
+      ],
+      "data_comparison": {
+        "encrypted_example": {
+          "_id": "645fdb2a7e5d0abcde123456",
+          "patient_id": 1025,
+          "is_encrypted": true,
+          "encrypted_data": { "ciphertext": "..." }
+        },
+        "plaintext_example": {
+          "_id": "645fdb2a7e5d0abcde123456",
+          "patient_id": 1025,
+          "diagnosis": "高血压",
+          "is_encrypted": true
+        },
+        "explanation": "这是同一条记录的加密版本和明文版本对比，可以看到加密后的字段被转换为加密数据"
+      },
+      "protocol_explanation": {
+        "protocol_type": "homomorphic",
+        "description": "同态加密PIR利用同态加密技术，允许在加密数据上执行计算，提供高强度安全性。虽然计算开销较大，但安全性显著提高。",
+        "parameter_descriptions": {
+          "encryption_bits": "同态加密密钥长度，影响安全性和计算开销",
+          "query_batching": "是否批量处理查询以提高吞吐量",
+          "optimization_level": "优化级别，影响计算速度和内存使用"
+        }
+      }
     }
   }
   ```
 
-#### 8. 删除实验
-- **URL**: `/api/researcher/experiments/{experiment_id}`
-- **方法**: `DELETE`
+#### 8. 解密实验查询结果
+- **URL**: `/api/researcher/experiment/decrypt-result`
+- **方法**: `POST`
 - **权限**: 研究员
+- **参数**:
+  - `experiment_id`: 实验ID
+  - `result_index`: 结果索引
+  - `encrypted_data`: 加密的结果数据
+- **功能说明**:
+  - 根据PIR协议类型解密查询结果
+  - 支持多种PIR协议的解密方法：基本、同态加密、混合协议和洋葱路由
+  - 解密后返回明文数据与原始结果进行对比
 - **响应**:
   ```json
   {
     "success": true,
-    "message": "删除实验成功",
+    "message": "解密成功",
     "data": {
-      "experiment_id": "实验ID"
+      "decrypted_data": [10, 20, 30, 40, 50],
+      "original_data": {
+        "target_index": 6099,
+        "result": [166, 170, 114, 114, 221, 21, 20, 195],
+        "query_time": 0.112,
+        "original_data": {
+          "_id": {"$oid": "68064a3a9e83b0fcc8026c15"},
+          "patient_id": 1048,
+          "is_encrypted": true
+        }
+      },
+      "plaintext_data": {
+        "_id": {"$oid": "68064a3a9e83b0fcc8026c15"},
+        "patient_id": 1048,
+        "doctor_id": 2004,
+        "record_type": "LAB_RESULT",
+        "blood_pressure": "97/76",
+        "heart_rate": 70
+      },
+      "protocol_type": "homomorphic"
     }
   }
   ```
 
-### PIR协议类型
-
-本系统支持以下PIR协议类型：
-
-1. **基本PIR协议 (Basic)** - 简单直接的PIR实现，适合教学和基准测试
-2. **同态加密PIR (Homomorphic)** - 使用同态加密技术的PIR，提供高强度安全性
-3. **混合PIR协议 (Hybrid)** - 结合多种技术的综合协议，平衡性能和安全性
-4. **洋葱路由PIR (Onion)** - 基于洋葱路由的多层加密PIR，提供最高隐私保护
-
-### 性能指标说明
-
-实验结果包含以下性能指标：
-
-1. **查询时间 (query_time)** - 执行查询所需的时间（秒）
-2. **准确率 (accuracy)** - 查询结果的准确性（0-1）
-3. **通信成本 (comm_cost)** - 查询产生的网络通信量（字节）
-4. **服务器负载 (server_load)** - 服务器端计算负担
-5. **客户端负载 (client_load)** - 客户端计算负担
-6. **隐私保护级别 (privacy_level)** - 协议提供的隐私保护强度（1-10）
-
-### 实验建议
-
-- 针对不同规模的数据集测试PIR协议性能
-- 比较不同协议在查询时间和通信量之间的权衡
-- 评估各协议在不同网络环境下的表现
-- 根据具体应用场景，选择合适的PIR协议参数
-
-## PIR实验实现详情
-
-PIR实验功能的实现通过以下主要组件完成：
-
-### 1. 核心功能类和工具函数
-
-- **PIRProtocolType** - 定义支持的PIR协议类型（基本、同态加密、混合等）
-- **PIRPerformanceMetric** - 定义评估PIR性能的关键指标
-- **generate_mock_health_data()** - 生成结构化/非结构化模拟健康数据
-- **configure_pir_protocol()** - 配置不同类型的PIR协议参数
-- **execute_pir_query_experiment()** - 执行PIR查询实验并收集性能指标
-- **analyze_experiment_results()** - 分析实验结果并提供优化建议
-
-### 2. API端点
-
-为研究员提供8个专用API端点，覆盖实验全流程：
-1. 生成模拟数据
-2. 配置协议参数
-3. 执行查询测试
-4. 收集性能指标
-5. 比较协议性能
-6. 管理实验记录
-
-### 3. 数据存储
-
-- 实验元数据和结果存储在MongoDB的`pir_experiments`集合中
-- 每个实验的模拟数据存储在单独的集合中，命名格式为`experiment_data_{实验ID}`
-- 性能指标以结构化格式存储，便于可视化和比较分析
-
-### 4. 性能评估
-
-系统评估6个关键性能指标：
-- 查询时间
-- 准确率
-- 通信成本
-- 服务器负载
-- 客户端负载
-- 隐私保护级别
-
-这些指标全面反映了PIR协议的效率和安全性权衡。
-
-### 5. 协议实现
-
-目前支持的PIR协议包括：
-- **基本PIR** - 简单直接的实现，适合作为基准
-- **同态加密PIR** - 提供高安全性，但计算开销较大
-- **混合PIR** - 结合分区技术和加密，平衡效率和隐私
-- **洋葱路由PIR** - 多层加密提供极高隐私保护
-
-### 技术特性
-
-1. **模块化设计** - 便于添加新的PIR协议实现
-2. **可配置参数** - 每种协议提供多个可调整参数
-3. **实时性能监控** - 详细记录每个查询的执行情况
-4. **数据可视化** - 支持将实验结果导出分析
-5. **比较分析** - 自动生成协议性能对比报告
-
-### 使用建议
-
-研究员可以通过以下方式充分利用PIR实验功能：
-
-1. 从小规模数据集开始，逐步增加数据量测试扩展性
-2. 针对每种协议类型，测试不同参数配置的影响
-3. 记录在不同网络条件下的性能差异
-4. 根据具体应用场景的重点（查询速度、隐私强度等）选择最适合的协议 
+#### 9. 解密结构化健康记录
+- **URL**: `/api/researcher/experiment/decrypt-record`
+- **方法**: `POST`
+- **权限**: 研究员
+- **参数**:
+  - `encrypted_record`: 加密的健康记录数据，包含以下必要字段:
+    - `encrypted_data`: 加密数据对象 (包含ciphertext, iv, tag, aad)
+    - `key_salt`: 密钥盐值
+    - `encryption_algorithm`: 加密算法 (仅支持'AES-GCM-256')
+    - `integrity_hash`: 完整性哈希值 (可选，用于验证和派生密钥)
+  - `decryption_key`: 自定义解密密钥 (可选，若不提供则自动派生)
+- **功能说明**:
+  - 解密使用AES-GCM-256加密的结构化健康记录
+  - 自动处理密钥派生，支持自定义解密密钥
+  - 返回解密后的记录数据和元数据
+  - 错误处理包括密钥错误、格式错误和解密失败等情况
+- **响应**:
+  ```json
+  {
+    "success": true,
+    "message": "成功解密记录",
+    "data": {
+      "decrypted_record": {
+        "diagnosis": "高血压",
+        "severity": "中度",
+        "notes": "患者表现出高血压的典型症状",
+        "medication": {
+          "name": "降压药",
+          "dosage": "10mg",
+          "frequency": "每日一次"
+        },
+        "lab_results": [
+          {
+            "test_name": "血压",
+            "value": "140/90",
+            "unit": "mmHg",
+            "reference": "120/80"
+          }
+        ]
+      },
+      "metadata": {
+        "original_hash": "8509d886bdb8755275c00ed68034440ea25bf8b3d1d5db24b1cc539399d8dcc0",
+        "encryption_date": "2025-04-21T21:38:50.226723",
+        "decryption_date": "2025-04-22T10:15:30.123456"
+      }
+    }
+  }
+  ```

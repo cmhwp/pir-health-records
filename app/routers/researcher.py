@@ -11,6 +11,13 @@ import numpy as np
 from collections import defaultdict
 import base64
 import hashlib
+import concurrent.futures
+from multiprocessing import cpu_count
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from ..models import db, User, Role, HealthRecord, RecordType, RecordVisibility
 from ..models.role_models import ResearcherInfo
@@ -27,8 +34,10 @@ from ..utils.experiment_utils import (
     generate_mock_health_data, 
     configure_pir_protocol,
     execute_pir_query_experiment,
-    analyze_experiment_results
+    analyze_experiment_results,
+    DateTimeEncoder
 )
+from ..utils.encryption_utils import encrypt_record, verify_record_integrity, decrypt_structured_data
 
 # 创建研究人员路由蓝图
 researcher_bp = Blueprint('researcher', __name__, url_prefix='/api/researcher')
@@ -2455,10 +2464,10 @@ def generate_mock_data():
         record_types = data.get('record_types')
         
         # 验证参数
-        if count > 1000:
+        if count > 100000:
             return jsonify({
                 'success': False,
-                'message': '生成数据量过大，请将数量控制在1000条以内'
+                'message': '生成数据量过大，请将数量控制在100000条以内'
             }), 400
             
         # 生成模拟数据
@@ -2468,6 +2477,65 @@ def generate_mock_data():
             record_types=record_types
         )
         
+        # 存储原始明文数据的副本（用于返回）
+        plaintext_data = []
+        
+        # 并行处理加密的记录
+        encrypted_records = []
+        plaintext_records = []
+        
+        for record in mock_data:
+            # 保存明文记录的副本，确保datetime对象被转换为字符串
+            plaintext_record = json.loads(json.dumps(record, cls=DateTimeEncoder))
+            plaintext_data.append(plaintext_record)
+            
+            if record.get('is_encrypted', False):
+                encrypted_records.append(record)
+            else:
+                plaintext_records.append(record)
+        
+        # 定义加密处理函数
+        def process_encrypted_record(record):
+            try:
+                # 生成一个简单的加密密钥
+                encryption_key = hashlib.sha256(f"mock_key_{record['_id']}".encode()).hexdigest()[:16]
+                
+                # 加密记录
+                encrypted_record = encrypt_record(record, encryption_key)
+                
+                # 添加完整性哈希
+                encrypted_record['integrity_hash'] = verify_record_integrity(encrypted_record)
+                
+                return encrypted_record
+            except Exception as e:
+                current_app.logger.error(f"加密记录失败: {str(e)}, 记录ID: {record.get('_id')}")
+                return record  # 返回原始记录作为备用
+        
+        # 并行处理加密记录
+        processed_records = []
+        if encrypted_records:
+            # 使用最多CPU核心数，但不超过8个
+            max_workers = min(cpu_count(), 8)
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有加密任务
+                future_to_record = {executor.submit(process_encrypted_record, record): record 
+                                   for record in encrypted_records}
+                
+                # 收集结果
+                for future in concurrent.futures.as_completed(future_to_record):
+                    original_record = future_to_record[future]
+                    try:
+                        processed_record = future.result()
+                        # 更新原始数据
+                        idx = mock_data.index(original_record)
+                        if idx >= 0:
+                            mock_data[idx] = processed_record
+                        processed_records.append(processed_record)
+                    except Exception as e:
+                        current_app.logger.error(f"获取加密结果失败: {str(e)}")
+                        processed_records.append(original_record)  # 使用原始记录作为备用
+        
         # 记录日志
         log_research(
             message=f"研究员{current_user.full_name}生成了{count}条模拟健康数据",
@@ -2475,7 +2543,8 @@ def generate_mock_data():
                 'researcher_id': current_user.id,
                 'data_count': count,
                 'structured': structured,
-                'record_types': record_types
+                'record_types': record_types,
+                'encrypted_count': len(encrypted_records)
             }
         )
         
@@ -2496,36 +2565,99 @@ def generate_mock_data():
             'parameters': {
                 'count': count,
                 'structured': structured,
-                'record_types': record_types
+                'record_types': record_types,
+                'encrypted_count': len(encrypted_records)
             },
             'data_count': len(mock_data)
         }
         
+        # 将元数据转换为可JSON序列化格式，然后重新转回来带ObjectId
+        serialized_meta = json.loads(json.dumps(experiment_meta, cls=DateTimeEncoder))
+        serialized_meta['_id'] = ObjectId(serialized_meta['_id'])
+        
         # 存储元数据和模拟数据
-        experiment_collection.insert_one(experiment_meta)
+        experiment_collection.insert_one(serialized_meta)
         
         # 为模拟数据创建单独的集合
         data_collection_name = f'experiment_data_{experiment_id}'
-        mongo_db[data_collection_name].insert_many(mock_data)
+        
+        # 批量插入数据，避免一次插入过多
+        batch_size = 1000
+        for i in range(0, len(mock_data), batch_size):
+            batch = mock_data[i:i+batch_size]
+            mongo_db[data_collection_name].insert_many(batch)
+        
+        # 创建一个集合来存储明文数据（仅用于演示）
+        plaintext_collection_name = f'experiment_plaintext_{experiment_id}'
+        
+        # 批量插入明文数据
+        for i in range(0, len(plaintext_data), batch_size):
+            batch = plaintext_data[i:i+batch_size]
+            mongo_db[plaintext_collection_name].insert_many(batch)
         
         # 更新实验元数据，添加数据集合名称
         experiment_collection.update_one(
             {'_id': ObjectId(experiment_id)},
-            {'$set': {'data_collection': data_collection_name}}
+            {'$set': {
+                'data_collection': data_collection_name,
+                'plaintext_collection': plaintext_collection_name
+            }}
         )
         
-        return jsonify({
+        # 准备返回数据（确保可序列化）
+        encrypted_samples = []
+        for r in mock_data[:3]:
+            if r.get('is_encrypted', False):
+                try:
+                    sample = json.loads(json.dumps(r, cls=DateTimeEncoder))
+                    encrypted_samples.append(sample)
+                except TypeError as e:
+                    current_app.logger.error(f"序列化失败: {str(e)}")
+        
+        plaintext_samples = []
+        for p in plaintext_data[:3]:
+            if p.get('is_encrypted', False):
+                try:
+                    sample = json.loads(json.dumps(p, cls=DateTimeEncoder))
+                    plaintext_samples.append(sample)
+                except TypeError as e:
+                    current_app.logger.error(f"序列化明文数据失败: {str(e)}")
+        
+        response_data = {
             'success': True,
             'message': '成功生成模拟健康数据',
             'data': {
                 'experiment_id': experiment_id,
                 'data_count': len(mock_data),
-                'sample': mock_data[:3] if len(mock_data) > 0 else []  # 返回3条样例数据
+                'encrypted_count': len(encrypted_records),
+                'sample': {
+                    'encrypted': encrypted_samples,
+                    'plaintext': plaintext_samples
+                }
             }
-        })
+        }
+        
+        # 最终检查以确保没有ObjectId
+        try:
+            json_str = json.dumps(response_data, cls=DateTimeEncoder)
+            return jsonify(json.loads(json_str))
+        except TypeError as e:
+            current_app.logger.error(f"最终序列化失败: {str(e)}")
+            # 使用安全的简化响应
+            return jsonify({
+                'success': True,
+                'message': '成功生成模拟健康数据，但返回样本时遇到序列化问题',
+                'data': {
+                    'experiment_id': experiment_id,
+                    'data_count': len(mock_data),
+                    'encrypted_count': len(encrypted_records)
+                }
+            })
         
     except Exception as e:
         current_app.logger.error(f"生成模拟健康数据失败: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'message': f'生成模拟健康数据失败: {str(e)}'
@@ -2625,7 +2757,7 @@ def execute_query_experiment():
         # 获取请求参数
         data = request.get_json()
         experiment_id = data.get('experiment_id')
-        query_count = min(data.get('query_count', 10), 50)  # 限制最大查询次数
+        query_count = min(data.get('query_count', 10), 1000)  # 限制最大查询次数
         
         # 验证实验ID
         if not experiment_id:
@@ -2662,6 +2794,10 @@ def execute_query_experiment():
                 'message': '实验数据集不存在'
             }), 404
             
+        # 记录查询开始时间
+        query_start_time = datetime.now()
+        current_app.logger.info(f"查询开始时间: {query_start_time.isoformat()}")
+        
         # 从数据集合获取数据
         experiment_data = list(mongo_db[data_collection_name].find())
         if not experiment_data:
@@ -2687,12 +2823,26 @@ def execute_query_experiment():
             protocol_config=protocol_config
         )
         
+        # 记录查询结束时间
+        query_end_time = datetime.now()
+        query_duration = (query_end_time - query_start_time).total_seconds()
+        current_app.logger.info(f"查询结束时间: {query_end_time.isoformat()}, 总耗时: {query_duration}秒")
+        
+        # 添加真实的查询总耗时到结果中
+        if 'metrics' not in experiment_results:
+            experiment_results['metrics'] = {}
+        experiment_results['metrics']['total_query_time'] = query_duration
+        experiment_results['metrics']['start_time'] = query_start_time.isoformat()
+        experiment_results['metrics']['end_time'] = query_end_time.isoformat()
+        
         # 更新实验记录，添加查询结果
         experiment_collection.update_one(
             {'_id': ObjectId(experiment_id)},
             {'$set': {
                 'query_results': experiment_results,
-                'query_time': datetime.now()
+                'query_time': query_end_time,
+                'query_start_time': query_start_time,
+                'query_duration': query_duration
             }}
         )
         
@@ -2704,7 +2854,8 @@ def execute_query_experiment():
                 'experiment_id': experiment_id,
                 'query_count': len(target_indices),
                 'protocol_type': protocol_config.get('protocol_type'),
-                'metrics': experiment_results.get('metrics')
+                'metrics': experiment_results.get('metrics'),
+                'total_duration': query_duration
             }
         )
         
@@ -2714,7 +2865,8 @@ def execute_query_experiment():
             'data': {
                 'experiment_id': experiment_id,
                 'query_count': len(target_indices),
-                'results': experiment_results
+                'results': experiment_results,
+                'total_duration': query_duration
             }
         })
         
@@ -2910,15 +3062,28 @@ def get_experiments():
             protocol_config = exp.get('protocol_config', {})
             query_results = exp.get('query_results', {})
             
+            # 安全处理日期字段
+            created_at = exp.get('created_at')
+            if created_at and not isinstance(created_at, str):
+                created_at = created_at.isoformat()
+            
+            updated_at = exp.get('updated_at')
+            if updated_at and not isinstance(updated_at, str):
+                updated_at = updated_at.isoformat()
+            
+            query_time = exp.get('query_time')
+            if query_time and not isinstance(query_time, str):
+                query_time = query_time.isoformat()
+            
             formatted_exp = {
                 'id': str(exp['_id']),
                 'experiment_type': exp.get('experiment_type'),
-                'created_at': exp.get('created_at').isoformat() if exp.get('created_at') else None,
-                'updated_at': exp.get('updated_at').isoformat() if exp.get('updated_at') else None,
+                'created_at': created_at,
+                'updated_at': updated_at,
                 'data_count': exp.get('data_count', 0),
                 'protocol_type': protocol_config.get('protocol_type') if protocol_config else None,
                 'has_results': 'query_results' in exp,
-                'query_time': exp.get('query_time').isoformat() if exp.get('query_time') else None
+                'query_time': query_time
             }
             
             # 如果有查询结果，添加简要的性能指标
@@ -2968,39 +3133,227 @@ def get_experiment_details(experiment_id):
                 'message': f'未找到实验记录: {experiment_id}'
             }), 404
             
+        # 安全处理日期字段
+        created_at = experiment.get('created_at')
+        if created_at and not isinstance(created_at, str):
+            created_at = created_at.isoformat()
+        
+        updated_at = experiment.get('updated_at')
+        if updated_at and not isinstance(updated_at, str):
+            updated_at = updated_at.isoformat()
+        
+        query_time = experiment.get('query_time')
+        if query_time and not isinstance(query_time, str):
+            query_time = query_time.isoformat()
+        
         # 格式化实验详情
         formatted_experiment = {
             'id': str(experiment['_id']),
             'experiment_type': experiment.get('experiment_type'),
-            'created_at': experiment.get('created_at').isoformat() if experiment.get('created_at') else None,
-            'updated_at': experiment.get('updated_at').isoformat() if experiment.get('updated_at') else None,
+            'created_at': created_at,
+            'updated_at': updated_at,
             'parameters': experiment.get('parameters', {}),
             'data_count': experiment.get('data_count', 0),
             'protocol_config': experiment.get('protocol_config'),
-            'query_time': experiment.get('query_time').isoformat() if experiment.get('query_time') else None
+            'query_time': query_time
         }
         
         # 获取查询结果
         if 'query_results' in experiment:
             query_results = experiment['query_results']
+            metrics = query_results.get('metrics', {})
+            sample_results = query_results.get('results', [])[:5]  # 仅返回前5个结果样例
+            
+            # 增加解密标志和解密API信息
+            for i, result in enumerate(sample_results):
+                # 如果结果包含加密数据，标记为需要解密
+                needs_decrypt = False
+                if 'original_data' in result and 'is_encrypted' in result['original_data']:
+                    if result['original_data']['is_encrypted']:
+                        needs_decrypt = True
+                
+                # 如果响应是二进制或数字数组，可能需要解密
+                if 'result' in result and isinstance(result['result'], list) and len(result['result']) > 0:
+                    if all(isinstance(x, (int, float)) for x in result['result']):
+                        needs_decrypt = True
+                
+                # 添加解密信息
+                result['needs_decrypt'] = needs_decrypt
+                result['result_index'] = i
+                result['decrypt_api'] = '/api/researcher/experiment/decrypt-result'
+            
             formatted_experiment['results'] = {
-                'metrics': query_results.get('metrics', {}),
-                'sample_results': query_results.get('results', [])[:5]  # 仅返回前5个结果样例
+                'metrics': metrics,
+                'sample_results': sample_results
             }
             
-        # 获取数据样例
-        if 'data_collection' in experiment:
+        # 获取数据样例和匹配的明文数据
+        has_encrypted_data = False
+        has_valid_comparison = False
+        if 'data_collection' in experiment and 'plaintext_collection' in experiment:
             data_collection = mongo_db[experiment['data_collection']]
-            data_samples = list(data_collection.find().limit(3))
+            plaintext_collection_name = experiment['plaintext_collection']
             
-            # 格式化样例数据
-            formatted_samples = []
-            for sample in data_samples:
-                sample['_id'] = str(sample['_id'])
-                formatted_samples.append(sample)
-                
-            formatted_experiment['data_samples'] = formatted_samples
-            
+            try:
+                # 确保明文集合存在
+                if plaintext_collection_name in mongo_db.list_collection_names():
+                    plaintext_collection = mongo_db[plaintext_collection_name]
+                    
+                    # 收集对应关系指标
+                    match_count = 0
+                    total_checked = 0
+                    
+                    # 查找所有加密样本并记录主要标识字段
+                    all_encrypted_samples = list(data_collection.find({"is_encrypted": True}).limit(10))
+                    current_app.logger.info(f"找到加密样本: {len(all_encrypted_samples)}个")
+                    
+                    # 创建映射关系: patient_id+doctor_id+record_type+title -> 记录
+                    encrypted_mapping = {}
+                    for sample in all_encrypted_samples:
+                        key = f"{sample.get('patient_id')}_{sample.get('doctor_id')}_{sample.get('record_type')}_{sample.get('title')}"
+                        encrypted_mapping[key] = sample
+                    
+                    # 获取所有明文样本
+                    all_plaintext_samples = list(plaintext_collection.find().limit(20))
+                    current_app.logger.info(f"找到明文样本: {len(all_plaintext_samples)}个")
+                    
+                    # 创建明文映射
+                    plaintext_mapping = {}
+                    for sample in all_plaintext_samples:
+                        key = f"{sample.get('patient_id')}_{sample.get('doctor_id')}_{sample.get('record_type')}_{sample.get('title')}"
+                        plaintext_mapping[key] = sample
+                    
+                    # 找到匹配对
+                    matched_pairs = []
+                    for key in encrypted_mapping:
+                        if key in plaintext_mapping:
+                            matched_pairs.append({
+                                'encrypted': encrypted_mapping[key],
+                                'plaintext': plaintext_mapping[key]
+                            })
+                            match_count += 1
+                        total_checked += 1
+                    
+                    current_app.logger.info(f"匹配到的明文和加密记录对: {match_count}/{total_checked}")
+                    
+                    # 格式化样例数据，优先使用匹配对
+                    formatted_samples = []
+                    plaintext_samples = []
+                    valid_comparison_pair = None
+                    
+                    # 首先添加匹配对的加密版本
+                    for pair in matched_pairs:
+                        enc_sample = pair['encrypted']
+                        enc_sample['_id'] = str(enc_sample['_id'])
+                        formatted_samples.append(enc_sample)
+                        has_encrypted_data = True
+                        
+                        # 同时处理明文版本
+                        plain_sample = pair['plaintext']
+                        plain_sample['_id'] = str(plain_sample['_id'])
+                        plaintext_samples.append(plain_sample)
+                        
+                        # 记录第一个有效对比对
+                        if not valid_comparison_pair:
+                            valid_comparison_pair = pair
+                            has_valid_comparison = True
+                    
+                    # 如果匹配对不足，添加未匹配的加密样本
+                    if len(formatted_samples) < 2:
+                        remaining_needed = 2 - len(formatted_samples)
+                        for sample in all_encrypted_samples:
+                            key = f"{sample.get('patient_id')}_{sample.get('doctor_id')}_{sample.get('record_type')}_{sample.get('title')}"
+                            if key not in [f"{pair['encrypted'].get('patient_id')}_{pair['encrypted'].get('doctor_id')}_{pair['encrypted'].get('record_type')}_{pair['encrypted'].get('title')}" for pair in matched_pairs]:
+                                sample['_id'] = str(sample['_id'])
+                                formatted_samples.append(sample)
+                                has_encrypted_data = True
+                                remaining_needed -= 1
+                                if remaining_needed <= 0:
+                                    break
+                    
+                    # 添加一些未加密样本到格式化样本中
+                    unencrypted_samples = list(data_collection.find({"is_encrypted": {"$ne": True}}).limit(2))
+                    for sample in unencrypted_samples:
+                        sample['_id'] = str(sample['_id'])
+                        formatted_samples.append(sample)
+                    
+                    # 设置格式化结果
+                    formatted_experiment['data_samples'] = formatted_samples
+                    
+                    # 如果有明文样本，设置明文样本
+                    if plaintext_samples:
+                        formatted_experiment['plaintext_samples'] = plaintext_samples
+                    else:
+                        # 如果没有通过匹配找到明文样本，使用一些默认样本
+                        for i in range(min(2, len(all_plaintext_samples))):
+                            sample = all_plaintext_samples[i]
+                            sample['_id'] = str(sample['_id'])
+                            plaintext_samples.append(sample)
+                        formatted_experiment['plaintext_samples'] = plaintext_samples
+                    
+                    # 提供数据对比
+                    if has_valid_comparison:
+                        # 使用已确认匹配的对
+                        formatted_experiment['data_comparison'] = {
+                            'encrypted_example': valid_comparison_pair['encrypted'],
+                            'plaintext_example': valid_comparison_pair['plaintext'],
+                            'explanation': '这是同一条记录的加密版本和明文版本对比，可以看到加密后的字段被转换为加密数据'
+                        }
+                    else:
+                        # 找不到匹配对，不提供比较
+                        current_app.logger.warning("未找到匹配的加密和明文记录对，无法提供有效对比")
+                else:
+                    current_app.logger.warning(f"明文集合不存在: {plaintext_collection_name}")
+                    # 如果明文集合不存在，至少展示一些加密样本
+                    formatted_samples = []
+                    encrypted_samples = list(data_collection.find({"is_encrypted": True}).limit(2))
+                    for sample in encrypted_samples:
+                        sample['_id'] = str(sample['_id'])
+                        formatted_samples.append(sample)
+                        has_encrypted_data = True
+                    
+                    unencrypted_samples = list(data_collection.find({"is_encrypted": {"$ne": True}}).limit(2))
+                    for sample in unencrypted_samples:
+                        sample['_id'] = str(sample['_id'])
+                        formatted_samples.append(sample)
+                    
+                    formatted_experiment['data_samples'] = formatted_samples
+                    formatted_experiment['plaintext_samples'] = []
+            except Exception as e:
+                current_app.logger.error(f"处理数据样本失败: {str(e)}")
+                import traceback
+                current_app.logger.error(traceback.format_exc())
+                # 确保至少有基本的样本数据
+                try:
+                    formatted_samples = []
+                    samples = list(data_collection.find().limit(4))
+                    for sample in samples:
+                        sample['_id'] = str(sample['_id'])
+                        formatted_samples.append(sample)
+                        if sample.get('is_encrypted'):
+                            has_encrypted_data = True
+                    
+                    formatted_experiment['data_samples'] = formatted_samples
+                    formatted_experiment['plaintext_samples'] = []
+                except Exception as inner_e:
+                    current_app.logger.error(f"备用数据获取也失败: {str(inner_e)}")
+                    formatted_experiment['data_samples'] = []
+                    formatted_experiment['plaintext_samples'] = []
+        else:
+            # 数据集合或明文集合配置缺失
+            current_app.logger.warning(f"数据集合或明文集合配置缺失: data_collection={experiment.get('data_collection')}, plaintext_collection={experiment.get('plaintext_collection')}")
+            formatted_experiment['data_samples'] = []
+            formatted_experiment['plaintext_samples'] = []
+        
+        # 添加实验配置和参数说明
+        if 'protocol_config' in experiment and experiment.get('protocol_config'):
+            protocol_type = experiment['protocol_config'].get('protocol_type')
+            formatted_experiment['protocol_explanation'] = {
+                'protocol_type': protocol_type,
+                'description': get_protocol_description(protocol_type),
+                'parameter_descriptions': get_protocol_parameter_descriptions(protocol_type)
+            }
+        
         return jsonify({
             'success': True,
             'message': '获取实验详情成功',
@@ -3009,10 +3362,47 @@ def get_experiment_details(experiment_id):
         
     except Exception as e:
         current_app.logger.error(f"获取实验详情失败: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'message': f'获取实验详情失败: {str(e)}'
         }), 500
+
+# 获取PIR协议说明
+def get_protocol_description(protocol_type):
+    descriptions = {
+        PIRProtocolType.BASIC: "基本PIR协议是最简单的隐私信息检索实现，适合作为基准测试和教学使用。它提供基础的查询隐私保护，但计算和通信开销相对较低。",
+        PIRProtocolType.HOMOMORPHIC: "同态加密PIR利用同态加密技术，允许在加密数据上执行计算，提供高强度安全性。虽然计算开销较大，但安全性显著提高。",
+        PIRProtocolType.HYBRID: "混合PIR协议结合了多种技术，在效率和隐私保护之间取得平衡。它通常结合分区技术和部分加密，在保持良好性能的同时提供较高隐私保护。",
+        PIRProtocolType.ONION: "洋葱路由PIR使用多层加密技术，类似于Tor网络，提供最高级别的隐私保护。每一层查询被加密并通过多个服务器路由，确保极高的匿名性。"
+    }
+    return descriptions.get(protocol_type, "未知协议类型")
+
+# 获取PIR协议参数说明
+def get_protocol_parameter_descriptions(protocol_type):
+    parameters = {
+        PIRProtocolType.BASIC: {
+            "query_size": "查询向量大小，影响通信开销和查询精度",
+            "noise_level": "添加到查询的随机噪声量，增加保护但降低效率"
+        },
+        PIRProtocolType.HOMOMORPHIC: {
+            "encryption_bits": "同态加密密钥长度，影响安全性和计算开销",
+            "query_batching": "是否批量处理查询以提高吞吐量",
+            "optimization_level": "优化级别，影响计算速度和内存使用"
+        },
+        PIRProtocolType.HYBRID: {
+            "partitioning_factor": "数据分区因子，影响查询效率和安全性",
+            "encryption_percentage": "使用加密的数据百分比",
+            "noise_distribution": "噪声分布类型和参数"
+        },
+        PIRProtocolType.ONION: {
+            "layers": "加密层数，影响安全级别和计算开销",
+            "routing_complexity": "路由复杂度，影响匿名性和查询时间",
+            "encryption_scheme": "每层使用的加密方案"
+        }
+    }
+    return parameters.get(protocol_type, {})
 
 # 研究人员PIR实验：删除实验
 @researcher_bp.route('/experiments/<experiment_id>', methods=['DELETE'])
@@ -3068,4 +3458,264 @@ def delete_experiment(experiment_id):
         return jsonify({
             'success': False,
             'message': f'删除实验失败: {str(e)}'
+        }), 500
+
+# 获取实验性能指标
+@researcher_bp.route('/experiment/performance/<experiment_id>', methods=['GET'])
+@login_required
+@role_required(Role.RESEARCHER)
+def get_experiment_performance(experiment_id):
+    try:
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查找实验记录
+        experiment = experiment_collection.find_one({'_id': ObjectId(experiment_id)})
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+            
+        # 获取查询结果和性能指标
+        query_results = experiment.get('query_results', {})
+        metrics = query_results.get('metrics', {})
+        
+        # 获取真实的总查询时间（如果可用）
+        total_query_time = experiment.get('query_duration')
+        if total_query_time is None and 'total_query_time' in metrics:
+            total_query_time = metrics.get('total_query_time')
+            
+        # 计算平均查询时间
+        query_time = metrics.get('query_time', 0)
+        query_count = metrics.get('query_count', 1)
+        average_query_time = query_time / max(query_count, 1)
+        
+        # 准备性能数据响应
+        performance_data = {
+            'experiment_id': experiment_id,
+            'protocol_type': experiment.get('protocol_config', {}).get('protocol_type', '未知'),
+            'data_size': experiment.get('data_count', 0),
+            'query_count': query_count,
+            'total_query_time': total_query_time,
+            'average_query_time': average_query_time,
+            'cpu_usage': metrics.get('cpu_usage', 0),
+            'memory_usage': metrics.get('memory_usage', 0),
+            'start_time': metrics.get('start_time'),
+            'end_time': metrics.get('end_time'),
+            'detailed_metrics': metrics
+        }
+        
+        # 记录日志
+        log_research(
+            message=f"研究员{current_user.full_name}获取了PIR实验性能指标",
+            details={
+                'researcher_id': current_user.id,
+                'experiment_id': experiment_id,
+                'metrics_accessed': True
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': '成功获取实验性能指标',
+            'data': performance_data
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取实验性能指标失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取实验性能指标失败: {str(e)}'
+        }), 500
+
+# 解密实验查询结果
+@researcher_bp.route('/experiment/decrypt-result', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def decrypt_experiment_result():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        experiment_id = data.get('experiment_id')
+        result_index = data.get('result_index')
+        encrypted_data = data.get('encrypted_data')
+        
+        if not experiment_id or not isinstance(encrypted_data, list):
+            return jsonify({
+                'success': False,
+                'message': '参数错误：需要实验ID和加密数据'
+            }), 400
+            
+        # 获取MongoDB连接
+        mongo_db = get_mongo_db()
+        experiment_collection = mongo_db.pir_experiments
+        
+        # 查找实验记录
+        experiment = experiment_collection.find_one({
+            '_id': ObjectId(experiment_id),
+            'researcher_id': current_user.id
+        })
+        
+        if not experiment:
+            return jsonify({
+                'success': False,
+                'message': f'未找到实验记录: {experiment_id}'
+            }), 404
+        
+        # 获取协议配置，用于解密
+        protocol_config = experiment.get('protocol_config', {})
+        protocol_type = protocol_config.get('protocol_type', 'basic')
+        
+        # 获取原始数据及其集合
+        data_collection_name = experiment.get('data_collection')
+        if not data_collection_name:
+            return jsonify({
+                'success': False,
+                'message': '实验数据集不存在'
+            }), 404
+        
+        # 从查询结果中获取目标结果
+        query_results = experiment.get('query_results', {})
+        all_results = query_results.get('results', [])
+        
+        # 根据索引获取原始结果数据
+        original_result = None
+        if result_index is not None and 0 <= result_index < len(all_results):
+            original_result = all_results[result_index]
+        
+        # 根据协议类型执行解密处理
+        decrypted_data = None
+        try:
+            from ..utils.pir_utils import PIRQuery
+            decrypted_data = PIRQuery.decrypt_result(
+                encrypted_data=encrypted_data,
+                protocol_type=protocol_type,
+                protocol_config=protocol_config
+            )
+            
+            # 如果有原始记录，获取对应的明文数据用于对比
+            plaintext_data = None
+            if original_result and 'original_data' in original_result:
+                plaintext_data = original_result.get('original_data')
+            
+            # 记录日志
+            log_research(
+                message=f"研究员{current_user.full_name}解密了实验查询结果",
+                details={
+                    'researcher_id': current_user.id,
+                    'experiment_id': experiment_id,
+                    'result_index': result_index,
+                    'protocol_type': protocol_type
+                }
+            )
+            
+            return jsonify({
+                'success': True,
+                'message': '解密成功',
+                'data': {
+                    'decrypted_data': decrypted_data,
+                    'original_data': original_result,
+                    'plaintext_data': plaintext_data,
+                    'protocol_type': protocol_type
+                }
+            })
+            
+        except Exception as decrypt_error:
+            current_app.logger.error(f"解密失败: {str(decrypt_error)}")
+            return jsonify({
+                'success': False,
+                'message': f'解密失败: {str(decrypt_error)}'
+            }), 400
+            
+    except Exception as e:
+        current_app.logger.error(f"处理解密请求失败: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'处理解密请求失败: {str(e)}'
+        }), 500
+
+# 解密结构化健康记录
+@researcher_bp.route('/experiment/decrypt-record', methods=['POST'])
+@login_required
+@role_required(Role.RESEARCHER)
+def decrypt_structured_record():
+    try:
+        # 获取请求参数
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': '请求参数无效：未提供数据'
+            }), 400
+            
+        # 提取加密记录数据
+        encrypted_record = data.get('encrypted_record')
+        custom_key = data.get('decryption_key')  # 可选参数
+        
+        if not encrypted_record or not isinstance(encrypted_record, dict):
+            return jsonify({
+                'success': False,
+                'message': '请求参数无效：未提供有效的加密记录数据'
+            }), 400
+            
+        # 验证记录格式
+        required_fields = ['encrypted_data', 'key_salt', 'encryption_algorithm']
+        missing_fields = [field for field in required_fields if field not in encrypted_record]
+        
+        if missing_fields:
+            return jsonify({
+                'success': False,
+                'message': f'记录格式无效: 缺少 {", ".join(missing_fields)} 字段'
+            }), 400
+            
+        # 记录活动日志
+        log_research(
+            message=f"研究员{current_user.full_name}尝试解密健康记录数据",
+            details={
+                'researcher_id': current_user.id,
+                'record_hash': encrypted_record.get('integrity_hash', '')
+            }
+        )
+        
+        # 引入解密函数
+        from ..utils.encryption_utils import decrypt_structured_data
+        
+        # 执行解密
+        decryption_result = decrypt_structured_data(
+            encrypted_record_data=encrypted_record,
+            encryption_key=custom_key
+        )
+        
+        # 检查解密结果
+        if not decryption_result.get('decryption_success', False):
+            return jsonify({
+                'success': False,
+                'message': f"解密失败: {decryption_result.get('error_message', '未知错误')}",
+                'data': {
+                    'metadata': decryption_result.get('metadata', {})
+                }
+            }), 400
+            
+        # 构建响应
+        return jsonify({
+            'success': True,
+            'message': '成功解密记录',
+            'data': {
+                'decrypted_record': decryption_result.get('decrypted_data', {}),
+                'metadata': decryption_result.get('metadata', {})
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"解密结构化记录失败: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'解密结构化记录失败: {str(e)}'
         }), 500

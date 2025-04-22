@@ -403,6 +403,73 @@ class PIRQuery:
         true_index = encoded_index - 100
         
         return true_index
+    
+    @staticmethod
+    def decrypt_result(encrypted_data, protocol_type, protocol_config):
+        """
+        解密PIR查询结果
+        
+        Args:
+            encrypted_data: 加密的查询结果数据
+            protocol_type: 使用的协议类型
+            protocol_config: 协议配置参数
+            
+        Returns:
+            解密后的数据
+        """
+        # 转换为numpy数组
+        if not isinstance(encrypted_data, np.ndarray):
+            encrypted_data = np.array(encrypted_data)
+            
+        # 根据不同协议类型进行解密
+        if protocol_type == "basic":
+            # 基本PIR协议不需要额外解密
+            return encrypted_data.tolist()
+            
+        elif protocol_type == "homomorphic":
+            # 同态加密PIR需要模拟同态解密
+            # 这里是简化的实现，实际应用需要集成真实的同态加密库
+            try:
+                # 如果加密强度较高，可能会有误差
+                noise_level = 0.001
+                # 模拟解密过程中的噪声移除
+                decrypted = encrypted_data + np.random.normal(0, noise_level, encrypted_data.shape)
+                # 四舍五入到最接近的整数
+                return np.round(decrypted).astype(np.int32).tolist()
+            except Exception as e:
+                current_app.logger.error(f"同态加密解密失败: {str(e)}")
+                return encrypted_data.tolist()
+                
+        elif protocol_type == "hybrid":
+            # 混合PIR协议解密
+            hybrid_mode = protocol_config.get("hybrid_mode", "index_homomorphic")
+            
+            if hybrid_mode == "index_homomorphic":
+                # 索引使用同态加密的混合协议
+                # 解除分片和加密的过程
+                decrypted = encrypted_data * 1.001  # 抵消微小误差
+                return np.round(decrypted).astype(np.int32).tolist()
+            else:
+                # 其他混合模式，当前仅返回原始数据
+                return encrypted_data.tolist()
+                
+        elif protocol_type == "onion":
+            # 洋葱路由PIR
+            # 模拟多层解密过程
+            layers = protocol_config.get("onion_layers", 3)
+            decrypted = encrypted_data.copy()
+            
+            # 每层解密会减少一定的噪声
+            for i in range(layers):
+                layer_factor = 1.0 + (0.001 * (layers - i))
+                decrypted = decrypted * layer_factor
+                
+            return np.round(decrypted).astype(np.int32).tolist()
+            
+        else:
+            # 未知协议类型，返回原始数据
+            current_app.logger.warning(f"未知的协议类型: {protocol_type}，无法解密")
+            return encrypted_data.tolist()
 
 def prepare_pir_database(health_records):
     """

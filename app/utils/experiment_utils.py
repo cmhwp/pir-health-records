@@ -8,6 +8,15 @@ import hashlib
 import base64
 from bson import ObjectId
 
+# 添加自定义JSON编码器
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, ObjectId):
+            return str(obj)
+        return super(DateTimeEncoder, self).default(obj)
+
 from ..models import db
 from ..models.health_records import HealthRecord, RecordVisibility
 from ..utils.mongo_utils import get_mongo_db
@@ -168,7 +177,10 @@ def generate_mock_health_data(count=100, structured=True, record_types=None):
                     "notes": f"进行了{random.choice(follow_up_types)}随访"
                 })
 
-            mock_data.append(record)
+            # 转换datetime和ObjectId为可序列化格式
+            serializable_record = json.loads(json.dumps(record, cls=DateTimeEncoder))
+            serializable_record["_id"] = ObjectId(serializable_record["_id"])
+            mock_data.append(serializable_record)
         else:
             # 生成随机数据(仅用于PIR算法测试，不包含有意义的医疗信息)
             random_data = np.random.rand(50)  # 生成50维随机向量
