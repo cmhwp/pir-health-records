@@ -41,14 +41,32 @@
 │   │   ├── notifications.py # 通知系统路由
 │   │   └── main.py     # 主要路由
 │   └── utils/          # 工具函数
-│       ├── pir_utils.py # PIR隐匿查询工具
-│       ├── mongo_utils.py # MongoDB工具
-│       ├── redis_utils.py # Redis缓存工具
-│       └── jwt_utils.py # JWT认证工具
+│       ├── mongo_utils.py # MongoDB 工具
+│       ├── jwt_utils.py # JWT 认证工具
+│       ├── settings_utils.py # 系统设置工具
+│       └── pir_utils.py  # PIR 隐私保护工具
 ├── requirements.txt    # 项目依赖
 ├── .env                # 环境变量配置
 └── run.py             # 应用入口点
 ```
+
+## 技术栈
+
+- **前端**：Vue 3 + Vite + TypeScript
+- **后端**：Flask (Python)
+- **数据库**：
+  - 关系型数据库：MySQL (存储用户、角色、权限等结构化数据)
+  - 文档数据库：MongoDB (存储健康记录详细内容)
+- 多数据库支持（MySQL、MongoDB）
+- RESTful API设计
+- JWT鉴权
+
+## 环境要求
+
+- Python 3.8+
+- MySQL 8.0+
+- MongoDB 4.4+
+- Node.js 14+ (前端开发)
 
 ## 隐私保护机制详解
 
@@ -76,7 +94,7 @@
 - 角色特定的用户资料和数据模型
 - 安全的密码加密和验证
 - 角色验证装饰器保护敏感路由
-- 多数据库支持（MySQL、MongoDB、Redis）
+- 多数据库支持（MySQL、MongoDB）
 - 基于环境变量的灵活配置
 - 高级搜索功能，支持多维度筛选和全文搜索
 - 健康数据分析和统计功能
@@ -97,7 +115,6 @@
 - pip (Python包管理器)
 - MySQL (必须)
 - MongoDB（必须）
-- Redis（可选，用于缓存和会话管理）
 
 ### 安装
 
@@ -131,32 +148,15 @@
 
 创建一个`.env`文件在根目录下，包含以下变量:
 
-```
-# 基本配置
-SECRET_KEY=你的密钥           # 用于加密会话和JWT
-FLASK_ENV=development       # 环境类型: development, testing, production
-FLASK_DEBUG=true            # 是否开启调试模式
-HOST=0.0.0.0                # 主机地址，0.0.0.0表示所有接口
-PORT=5000                   # 应用端口
+```bash
+# MySQL 配置
+MYSQL_URL=mysql://用户名:密码@主机:端口/数据库名
 
-# 数据库配置
-# MySQL 配置 (必须)
-DEV_MYSQL_URL=mysql://用户名:密码@主机/开发数据库
-TEST_MYSQL_URL=mysql://用户名:密码@主机/测试数据库
-MYSQL_URL=mysql://用户名:密码@主机/生产数据库
+# MongoDB 配置
+MONGO_URI=mongodb://用户名:密码@主机:端口/数据库名
 
-# MongoDB 配置 (必须)
-DEV_MONGO_URI=mongodb://主机:端口/开发数据库
-TEST_MONGO_URI=mongodb://主机:端口/测试数据库
-MONGO_URI=mongodb://主机:端口/生产数据库
-
-# Redis 配置 (可选)
-REDIS_URL=redis://主机:端口/数据库号
-
-# PIR配置
-PIR_ENABLE_OBFUSCATION=true  # 是否启用查询混淆
-PIR_MAX_NOISE_QUERIES=3      # 最大噪声查询数
-PIR_ENCRYPTION_STRENGTH=high # 加密强度 (low/medium/high)
+# 密钥配置
+SECRET_KEY=你的密钥
 ```
 
 系统会根据`FLASK_ENV`环境变量自动选择相应的数据库配置。

@@ -5,7 +5,7 @@ from flask import current_app
 from ..models.system_settings import SystemSetting
 
 class SettingsCache:
-    """系统设置缓存，避免频繁查询数据库"""
+    """系统设置缓存，避免频繁查询数据库，使用纯内存缓存"""
     _instance = None
     _settings = {}
     _last_updated = None
@@ -55,7 +55,7 @@ class SettingsCache:
 
 
 def get_setting(key, default=None):
-    """获取系统设置，优先使用缓存"""
+    """获取系统设置，使用内存缓存"""
     return SettingsCache.get_instance().get_setting(key, default)
 
 

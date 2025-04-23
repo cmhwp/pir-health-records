@@ -18,7 +18,6 @@ from .institution import Institution, CustomRecordType
 from .notification import Notification, NotificationType
 from .system_settings import SystemSetting
 from .log import SystemLog, LogType
-from .cache_item import CacheItem
 from .prescription import Prescription, PrescriptionStatus, PrescriptionItem
 from .researcher import ResearchProject, ProjectTeamMember, ProjectStatus
 from .export import ExportTask, ExportStatus

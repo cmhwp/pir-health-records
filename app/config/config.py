@@ -12,9 +12,6 @@ class Config:
     # MongoDB配置
     MONGO_URI = os.environ.get('MONGO_URI') or 'mongodb://localhost:27017/pir_health_records'
     
-    # Redis配置(未使用)
-    REDIS_URL = os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
-    
     # PIR配置
     PIR_ENABLE_OBFUSCATION = True  # 启用查询混淆
     PIR_NOISE_QUERY_COUNT = 3      # 噪声查询数量

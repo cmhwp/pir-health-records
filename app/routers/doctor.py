@@ -575,7 +575,6 @@ def decrypt_record_api(record_id):
 # 合规性验证接口 - 验证记录是否符合合规要求
 @doctor_bp.route('/records/<record_id>/verify-compliance', methods=['POST'])
 @login_required
-@role_required(Role.DOCTOR)
 def verify_record_compliance(record_id):
     try:
         # 获取记录
@@ -585,6 +584,14 @@ def verify_record_compliance(record_id):
                 'success': False,
                 'message': '记录不存在'
             }), 404
+        
+        # 验证用户是否有权限访问记录
+        if record.patient_id != current_user.id and record.doctor_id != current_user.id:
+            # 不是创建记录的医生也不是记录所属的患者
+            return jsonify({
+                'success': False,
+                'message': '没有权限验证此记录'
+            }), 403
         
         # 获取MongoDB记录
         mongo_db = get_mongo_db()
@@ -836,23 +843,29 @@ def get_doctor_dashboard():
     try:
         today = datetime.now().date()
         
-        # 获取医生今日患者数量
-        today_patients_count = db.session.query(func.count(distinct(HealthRecord.patient_id))).filter(
+        # 获取医生的处方患者数量（而非健康记录）
+        from ..models.prescription import Prescription
+        
+        # 今日处方患者数量
+        today_patients_count = db.session.query(func.count(distinct(Prescription.patient_id))).filter(
+            Prescription.doctor_id == current_user.id,
+            func.date(Prescription.created_at) == today
+        ).scalar() or 0
+        
+        # 获取医生总处方患者数量
+        total_patients_count = db.session.query(func.count(distinct(Prescription.patient_id))).filter(
+            Prescription.doctor_id == current_user.id
+        ).scalar() or 0
+        
+        # 获取医生可见的健康记录数量（仅包括DOCTOR或PUBLIC可见性）
+        total_records_count = HealthRecord.query.filter(
             HealthRecord.doctor_id == current_user.id,
-            func.date(HealthRecord.created_at) == today
-        ).scalar() or 0
+            HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
+        ).count()
         
-        # 获取医生总患者数量
-        total_patients_count = db.session.query(func.count(distinct(HealthRecord.patient_id))).filter(
-            HealthRecord.doctor_id == current_user.id
-        ).scalar() or 0
-        
-        # 获取医生处理的记录数量
-        total_records_count = HealthRecord.query.filter_by(doctor_id=current_user.id).count()
-        
-        # 获取最近的5条健康记录
-        recent_records = HealthRecord.query.filter_by(
-            doctor_id=current_user.id
+        # 获取最近的5条健康记录（仅包括医生可见的）
+        recent_records = HealthRecord.query.filter(
+            HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
         ).order_by(HealthRecord.created_at.desc()).limit(5).all()
         
         recent_records_data = []
@@ -866,9 +879,10 @@ def get_doctor_dashboard():
                 'title': record.title,
                 'patient_id': record.patient_id,
                 'patient_name': patient_name,
-                'record_type': record.record_type.value,
+                'record_type': record.record_type,
                 'record_date': record.record_date.isoformat() if record.record_date else None,
-                'created_at': record.created_at.isoformat() if record.created_at else None
+                'created_at': record.created_at.isoformat() if record.created_at else None,
+                'visibility': record.visibility.value
             }
             recent_records_data.append(record_dict)
         
@@ -882,6 +896,12 @@ def get_doctor_dashboard():
                 'years_of_experience': current_user.doctor_info.years_of_experience
             }
         
+        # 获取待处理处方数量
+        pending_prescriptions_count = Prescription.query.filter_by(
+            doctor_id=current_user.id,
+            status=PrescriptionStatus.PENDING
+        ).count()
+        
         return jsonify({
             'success': True,
             'data': {
@@ -893,7 +913,8 @@ def get_doctor_dashboard():
                 'statistics': {
                     'today_patients': today_patients_count,
                     'total_patients': total_patients_count,
-                    'total_records': total_records_count
+                    'total_visible_records': total_records_count,
+                    'pending_prescriptions': pending_prescriptions_count
                 },
                 'recent_records': recent_records_data
             }
@@ -966,8 +987,14 @@ def get_doctor_patients():
         # 处理结果
         result = []
         for patient in patients:
-            # 获取患者记录数量
-            record_count = HealthRecord.query.filter_by(
+            # 获取患者对医生可见的健康记录数量（只包括医生可见和公开可见的记录）
+            record_count = HealthRecord.query.filter(
+                HealthRecord.patient_id == patient.id,
+                HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
+            ).count()
+            
+            # 获取患者由医生创建的健康记录数量
+            doctor_created_records = HealthRecord.query.filter_by(
                 patient_id=patient.id,
                 doctor_id=current_user.id
             ).count()
@@ -979,9 +1006,9 @@ def get_doctor_patients():
             ).count()
             
             # 获取最近一次记录时间（包括健康记录和处方记录）
-            latest_record = HealthRecord.query.filter_by(
-                patient_id=patient.id,
-                doctor_id=current_user.id
+            latest_record = HealthRecord.query.filter(
+                HealthRecord.patient_id == patient.id,
+                HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
             ).order_by(HealthRecord.created_at.desc()).first()
             
             latest_prescription = Prescription.query.filter_by(
@@ -1012,7 +1039,8 @@ def get_doctor_patients():
                 'name': patient.full_name,
                 'email': patient.email,
                 'info': patient_info,
-                'record_count': record_count,
+                'visible_record_count': record_count,
+                'doctor_created_record_count': doctor_created_records,
                 'prescription_count': prescription_count,
                 'total_interactions': record_count + prescription_count,
                 'latest_visit': latest_time.isoformat() if latest_time else None,
@@ -1055,11 +1083,9 @@ def get_patient_details(patient_id):
                 'message': '患者不存在或无效'
             }), 404
         
-        # 验证医生是否处理过该患者
-        has_record = HealthRecord.query.filter_by(
-            patient_id=patient_id,
-            doctor_id=current_user.id
-        ).first() is not None
+        # 验证医生是否处理过该患者（通过处方或已创建健康记录）
+        has_record = (HealthRecord.query.filter_by(patient_id=patient_id, doctor_id=current_user.id).first() is not None) or \
+                     (Prescription.query.filter_by(patient_id=patient_id, doctor_id=current_user.id).first() is not None)
         
         if not has_record:
             return jsonify({
@@ -1080,8 +1106,19 @@ def get_patient_details(patient_id):
                 'address': patient.patient_info.address
             }
         
-        # 获取患者记录统计
+        # 获取患者可见健康记录统计（包括医生可见和公开可见的记录）
         record_stats = db.session.query(
+            HealthRecord.record_type,
+            func.count(HealthRecord.id).label('count')
+        ).filter(
+            HealthRecord.patient_id == patient_id,
+            HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
+        ).group_by(HealthRecord.record_type).all()
+        
+        record_stats_dict = {record_type: count for record_type, count in record_stats}
+        
+        # 获取医生创建的该患者记录统计
+        doctor_created_stats = db.session.query(
             HealthRecord.record_type,
             func.count(HealthRecord.id).label('count')
         ).filter(
@@ -1089,12 +1126,12 @@ def get_patient_details(patient_id):
             HealthRecord.doctor_id == current_user.id
         ).group_by(HealthRecord.record_type).all()
         
-        record_stats_dict = {record_type.value: count for record_type, count in record_stats}
+        doctor_created_stats_dict = {record_type: count for record_type, count in doctor_created_stats}
         
-        # 获取最近的健康记录
-        recent_records = HealthRecord.query.filter_by(
-            patient_id=patient_id,
-            doctor_id=current_user.id
+        # 获取最近的健康记录（包括医生可见和公开可见的记录）
+        recent_records = HealthRecord.query.filter(
+            HealthRecord.patient_id == patient_id,
+            HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
         ).order_by(HealthRecord.created_at.desc()).limit(5).all()
         
         recent_records_data = []
@@ -1103,9 +1140,11 @@ def get_patient_details(patient_id):
                 'id': record.id,
                 'mongo_id': record.mongo_id,
                 'title': record.title,
-                'record_type': record.record_type.value,
+                'record_type': record.record_type,
                 'record_date': record.record_date.isoformat() if record.record_date else None,
-                'created_at': record.created_at.isoformat() if record.created_at else None
+                'created_at': record.created_at.isoformat() if record.created_at else None,
+                'visibility': record.visibility.value,
+                'is_doctor_created': record.doctor_id == current_user.id
             }
             recent_records_data.append(record_dict)
         
@@ -1119,6 +1158,17 @@ def get_patient_details(patient_id):
             }
         )
         
+        # 获取患者处方统计信息
+        prescription_stats = Prescription.query.filter_by(
+            patient_id=patient_id,
+            doctor_id=current_user.id
+        ).with_entities(
+            Prescription.status,
+            func.count(Prescription.id).label('count')
+        ).group_by(Prescription.status).all()
+        
+        prescription_stats_dict = {status.value: count for status, count in prescription_stats}
+        
         return jsonify({
             'success': True,
             'data': {
@@ -1130,9 +1180,21 @@ def get_patient_details(patient_id):
                     'created_at': patient.created_at.isoformat() if patient.created_at else None,
                     'info': patient_info
                 },
-                'record_statistics': record_stats_dict,
+                'record_statistics': {
+                    'visible_records': record_stats_dict,
+                    'doctor_created': doctor_created_stats_dict
+                },
+                'prescription_statistics': prescription_stats_dict,
                 'recent_records': recent_records_data,
-                'total_records': HealthRecord.query.filter_by(
+                'total_visible_records': HealthRecord.query.filter(
+                    HealthRecord.patient_id == patient_id,
+                    HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
+                ).count(),
+                'total_doctor_created_records': HealthRecord.query.filter_by(
+                    patient_id=patient_id,
+                    doctor_id=current_user.id
+                ).count(),
+                'total_prescriptions': Prescription.query.filter_by(
                     patient_id=patient_id,
                     doctor_id=current_user.id
                 ).count()
@@ -1576,7 +1638,7 @@ def get_patient_statistics():
             *query_filters
         ).group_by(HealthRecord.record_type).all()
         
-        record_type_data = {record_type.value: count for record_type, count in record_type_stats}
+        record_type_data = {record_type: count for record_type, count in record_type_stats}
         
         # 每月新增患者数量统计
         monthly_patients = []
@@ -2120,7 +2182,7 @@ def delete_health_record(record_id):
                 'sql_id': record.id,
                 'doctor_id': current_user.id,
                 'patient_id': record.patient_id,
-                'record_type': record.record_type.value if record.record_type else None,
+                'record_type': record.record_type,
                 'deletion_time': datetime.now().isoformat()
             }
         )
@@ -2138,4 +2200,163 @@ def delete_health_record(record_id):
         return jsonify({
             'success': False,
             'message': f'删除健康记录失败: {str(e)}'
+        }), 500
+
+# 获取患者创建的健康记录列表（医生可见或公开可见）
+@doctor_bp.route('/patient-records', methods=['GET'])
+@login_required
+@role_required(Role.DOCTOR)
+def get_patient_visible_records():
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)  # 限制最大每页数量
+        
+        # 获取患者创建的记录，医生可见或公开可见
+        query = HealthRecord.query.filter(
+            HealthRecord.visibility.in_([RecordVisibility.DOCTOR, RecordVisibility.PUBLIC])
+        )
+        
+        # 按患者筛选
+        patient_id = request.args.get('patient_id')
+        if patient_id:
+            query = query.filter_by(patient_id=patient_id)
+        
+        # 按记录类型筛选
+        record_type = request.args.get('record_type')
+        if record_type:
+            query = query.filter_by(record_type=record_type)
+        
+        # 按时间范围筛选
+        start_date = request.args.get('start_date')
+        if start_date:
+            try:
+                start_date = datetime.strptime(start_date, '%Y-%m-%d')
+                query = query.filter(HealthRecord.record_date >= start_date)
+            except ValueError:
+                pass
+                
+        end_date = request.args.get('end_date')
+        if end_date:
+            try:
+                end_date = datetime.strptime(end_date, '%Y-%m-%d')
+                query = query.filter(HealthRecord.record_date <= end_date)
+            except ValueError:
+                pass
+        
+        # 排序
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'desc')
+        
+        if sort_order == 'desc':
+            query = query.order_by(getattr(HealthRecord, sort_by).desc())
+        else:
+            query = query.order_by(getattr(HealthRecord, sort_by).asc())
+        
+        # 分页
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        records = pagination.items
+        
+        # 转换为字典列表
+        result = []
+        for record in records:
+            record_dict = record.to_dict(include_mongo_data=False)  # 不包含MongoDB详细数据
+            # 获取患者名称
+            patient = User.query.get(record.patient_id)
+            if patient:
+                record_dict['patient_name'] = patient.full_name
+            result.append(record_dict)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'records': result,
+                'pagination': {
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'page': page,
+                    'per_page': per_page,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取患者健康记录列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取患者健康记录列表失败: {str(e)}'
+        }), 500
+
+# 获取单个患者健康记录详情（医生可见或公开可见）
+@doctor_bp.route('/patient-records/<record_id>', methods=['GET'])
+@login_required
+@role_required(Role.DOCTOR)
+def get_patient_record_detail(record_id):
+    try:
+        # 获取记录
+        record = HealthRecord.query.get(record_id)
+        if not record:
+            return jsonify({
+                'success': False,
+                'message': '记录不存在'
+            }), 404
+        
+        # 验证记录可见性
+        if record.visibility not in [RecordVisibility.DOCTOR, RecordVisibility.PUBLIC]:
+            return jsonify({
+                'success': False,
+                'message': '没有权限查看此记录'
+            }), 403
+        
+        # 获取完整记录数据（包括MongoDB数据）
+        record_data = record.to_dict(include_mongo_data=True)
+        
+        # 获取患者信息
+        patient = User.query.get(record.patient_id)
+        if patient:
+            record_data['patient_name'] = patient.full_name
+            
+            # 添加基本患者信息
+            if hasattr(patient, 'patient_info') and patient.patient_info:
+                record_data['patient_info'] = {
+                    'gender': patient.patient_info.gender,
+                    'date_of_birth': patient.patient_info.date_of_birth.isoformat() if patient.patient_info.date_of_birth else None,
+                    'allergies': patient.patient_info.allergies,
+                    'medical_history': patient.patient_info.medical_history
+                }
+        
+        # 记录查询操作
+        query_history = QueryHistory(
+            user_id=current_user.id,
+            record_id=record.id,
+            query_type='view_detail',
+            is_anonymous=False
+        )
+        db.session.add(query_history)
+        
+        log_record(
+            message=f'医生{current_user.full_name}查看了健康记录: {record.title}',
+            details={
+                'record_id': record.mongo_id,
+                'sql_id': record.id,
+                'doctor_id': current_user.id,
+                'patient_id': record.patient_id,
+                'query_time': datetime.now().isoformat()
+            }
+        )
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'data': record_data
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"获取健康记录详情失败: {str(e)}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': f'获取健康记录详情失败: {str(e)}'
         }), 500

@@ -3923,28 +3923,20 @@ def fix_missing_versions():
 @health_bp.route('/share/users', methods=['GET'])
 @login_required
 def get_shareable_users():
-    """获取患者可以共享记录的用户列表，包括医生和其他患者"""
+    """获取患者可以共享记录的用户列表，只包括患者"""
     try:
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
         # 搜索条件
         search_term = request.args.get('search', '')
-        role_filter = request.args.get('role')  # 可以筛选角色：doctor, patient
         
-        # 基础查询：不包括自己和管理员
+        # 基础查询：只包括患者，不包括自己和管理员
         query = User.query.filter(
             User.id != current_user.id,  # 排除自己
+            User.role == Role.PATIENT,   # 只包括患者
             User.role != Role.ADMIN      # 排除管理员
         )
-        
-        # 按角色过滤
-        if role_filter:
-            try:
-                role_enum = next(r for r in Role if r.value == role_filter)
-                query = query.filter(User.role == role_enum)
-            except (StopIteration, ValueError):
-                pass  # 无效角色，忽略过滤
         
         # 搜索
         if search_term:
@@ -3954,8 +3946,7 @@ def get_shareable_users():
                 User.email.ilike(f'%{search_term}%')
             ))
         
-        # 按最近共享情况排序
-        # 使用简单的排序方式避免SQLAlchemy版本兼容性问题
+        # 按姓名排序
         query = query.order_by(User.full_name)
         
         # 处理分页
@@ -3974,14 +3965,8 @@ def get_shareable_users():
                 'role': user.role.value
             }
             
-            # 添加角色特定信息
-            if user.role == Role.DOCTOR and hasattr(user, 'doctor_info') and user.doctor_info:
-                user_data['doctor_info'] = {
-                    'specialty': user.doctor_info.specialty,
-                    'hospital': user.doctor_info.hospital,
-                    'department': user.doctor_info.department
-                }
-            elif user.role == Role.PATIENT and hasattr(user, 'patient_info') and user.patient_info:
+            # 添加患者特定信息
+            if user.role == Role.PATIENT and hasattr(user, 'patient_info') and user.patient_info:
                 user_data['patient_info'] = {
                     'gender': user.patient_info.gender
                 }
@@ -3999,16 +3984,14 @@ def get_shareable_users():
         result_with_counts.sort(key=lambda x: x[1], reverse=True)
         result = [item[0] for item in result_with_counts]
         
-        # 角色统计
-        role_counts = db.session.query(
-            User.role, func.count().label('count')
-        ).filter(
+        # 角色统计 - 现在只有患者角色
+        patient_count = db.session.query(func.count()).filter(
             User.id != current_user.id,
             User.is_active == True,
-            User.role != Role.ADMIN
-        ).group_by(User.role).all()
+            User.role == Role.PATIENT
+        ).scalar()
         
-        role_stats = {r.value: c for r, c in role_counts}
+        role_stats = {Role.PATIENT.value: patient_count}
         
         return jsonify({
             'success': True,
