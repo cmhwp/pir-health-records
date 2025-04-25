@@ -1,31 +1,35 @@
-from flask import Blueprint, request, jsonify, current_app
-from flask_login import login_required, current_user
-from sqlalchemy import func, desc, or_, and_, case, cast, Float
-from datetime import datetime, timedelta
-from bson.objectid import ObjectId
+from flask import Blueprint, request, jsonify, current_app, g, send_file, render_template
+import os
 import json
 import csv
 import io
 import random
 import numpy as np
+import pandas as pd
+import string
+import threading
+import time
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 from collections import defaultdict
 import base64
 import hashlib
 import concurrent.futures
 from multiprocessing import cpu_count
 import re
-import pandas as pd
-import matplotlib.pyplot as plt
+from bson.objectid import ObjectId
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from sqlalchemy import func, desc, or_, and_, case, cast, Float
+from flask_login import login_required, current_user
 
-from ..models import db, User, Role, HealthRecord, RecordType, RecordVisibility
+from ..models import db, User, Role
 from ..models.role_models import ResearcherInfo
-from ..models.health_records import mongo_health_record_to_dict, get_mongo_health_record
+from ..models.health_records import HealthRecord, RecordType, RecordVisibility, mongo_health_record_to_dict, get_mongo_health_record
 from ..models.researcher import ResearchProject, ProjectTeamMember, ProjectStatus
 from ..models.institution import CustomRecordType
 from ..routers.auth import role_required
-from ..utils.mongo_utils import mongo, get_mongo_db
+from ..utils.mongo_utils import mongo, get_mongo_db, format_mongo_docs, format_mongo_doc
 from ..utils.log_utils import log_record, log_research, log_pir
 from ..utils.pir_utils import PIRQuery, prepare_pir_database, parse_encrypted_query_id, find_similar_records
 from ..utils.experiment_utils import (
@@ -2800,6 +2804,10 @@ def execute_query_experiment():
         
         # 从数据集合获取数据
         experiment_data = list(mongo_db[data_collection_name].find())
+        
+        # 处理ObjectId - 将数据中的ObjectId预先转换为字符串
+        experiment_data = format_mongo_docs(experiment_data)
+        
         if not experiment_data:
             return jsonify({
                 'success': False,
@@ -2834,6 +2842,9 @@ def execute_query_experiment():
         experiment_results['metrics']['total_query_time'] = query_duration
         experiment_results['metrics']['start_time'] = query_start_time.isoformat()
         experiment_results['metrics']['end_time'] = query_end_time.isoformat()
+        
+        # 确保实验结果中所有的ObjectId被转换为字符串
+        experiment_results = format_mongo_doc(experiment_results)
         
         # 更新实验记录，添加查询结果
         experiment_collection.update_one(
@@ -2872,6 +2883,8 @@ def execute_query_experiment():
         
     except Exception as e:
         current_app.logger.error(f"执行PIR查询实验失败: {str(e)}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'message': f'执行PIR查询实验失败: {str(e)}'

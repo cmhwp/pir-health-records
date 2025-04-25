@@ -15,7 +15,10 @@ def create_app(config_name="development"):
     # 初始化扩展
     db.init_app(app)
     login_manager.init_app(app)
+    
+    # 初始化MongoDB(包括注册JSON编码器)
     init_mongo(app)
+    
     CORS(app)
     
     # 初始化JWT认证

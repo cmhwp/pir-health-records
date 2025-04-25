@@ -20,6 +20,17 @@ def init_mongo(app):
     """
     mongo.init_app(app)
     
+    # 注册自定义JSON编码器以处理ObjectId
+    try:
+        # For newer Flask versions
+        app.json_provider_class.encoder = MongoJSONEncoder
+    except AttributeError:
+        # Fallback for older Flask versions
+        try:
+            app.json.encoder = MongoJSONEncoder
+        except AttributeError:
+            current_app.logger.warning("Unable to set custom JSON encoder, using default")
+    
     # 创建索引
     with app.app_context():
         # 健康记录集合的索引
@@ -55,12 +66,17 @@ def init_mongo(app):
 class MongoJSONEncoder(json.JSONEncoder):
     """MongoDB数据的JSON编码器，处理特殊类型"""
     def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
         if isinstance(obj, datetime.date):
             return obj.isoformat()
         if hasattr(obj, '_id'):
-            return str(obj._id)
+            obj_dict = obj.__dict__.copy()
+            if isinstance(obj_dict.get('_id'), ObjectId):
+                obj_dict['_id'] = str(obj_dict['_id'])
+            return obj_dict
         return super(MongoJSONEncoder, self).default(obj)
 
 def format_mongo_doc(doc):
@@ -75,6 +91,9 @@ def format_mongo_doc(doc):
         result = {}
         for key, value in doc.items():
             if key == '_id' and isinstance(value, ObjectId):
+                result[key] = str(value)
+            elif isinstance(value, ObjectId):
+                # 处理所有的ObjectId，不仅是_id字段
                 result[key] = str(value)
             elif isinstance(value, datetime.datetime):
                 result[key] = value.isoformat()
