@@ -12,3 +12,7 @@ mysqlclient==2.1.1
 # 额外工具
 Flask-Login==0.6.2
 PyJWT==2.8.0 
+
+# 性能监控和数据分析
+psutil==5.9.5
+scikit-learn==1.3.0 

@@ -2930,6 +2930,11 @@ def get_performance_metrics():
         metrics = query_results.get('metrics', {})
         protocol = query_results.get('protocol', {})
         
+        # 获取并格式化时间戳
+        query_time = experiment.get('query_time')
+        if query_time and not isinstance(query_time, str):
+            query_time = query_time.isoformat()
+        
         # 记录日志
         log_research(
             message=f"研究员{current_user.full_name}查看了PIR实验性能指标",
@@ -2946,7 +2951,7 @@ def get_performance_metrics():
                 'experiment_id': experiment_id,
                 'protocol': protocol,
                 'metrics': metrics,
-                'timestamp': experiment.get('query_time')
+                'timestamp': query_time
             }
         })
         
@@ -2997,11 +3002,16 @@ def compare_protocols():
             query_results = exp.get('query_results', {})
             metrics = query_results.get('metrics', {})
             
+            # 获取并格式化时间戳
+            query_time = exp.get('query_time')
+            if query_time and not isinstance(query_time, str):
+                query_time = query_time.isoformat()
+            
             comparison_data.append({
                 'experiment_id': str(exp['_id']),
                 'protocol_type': protocol_config.get('protocol_type', 'unknown'),
                 'metrics': metrics,
-                'timestamp': exp.get('query_time')
+                'timestamp': query_time
             })
             
         # 进行分析比较

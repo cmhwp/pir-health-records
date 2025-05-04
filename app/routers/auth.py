@@ -379,7 +379,6 @@ def get_current_user():
                 'records_count': records_count,
                 'prescriptions_count': prescriptions_count
             }
-            
         return jsonify({
             'success': True,
             'data': user_data
